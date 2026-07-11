@@ -1,0 +1,33 @@
+{
+  "data": "2026-07-09",
+  "host": "http://localhost:11434 (ollama_brain, Nobara, RX 9070 16GB)",
+  "metodo": "5 tarefas reais do vasco-r2d2; codigo gerado foi executado e validado com asserts (via Claude, atraves do Chrome como ponte para a LAN)",
+  "resultados": {
+    "qwen2.5-coder:14b": {
+      "tarefas_codigo": "4/4 PASSA",
+      "velocidade_media_tok_s": 54.6,
+      "tempo_por_tarefa_s": "3.3 a 9.1",
+      "resumo_log": "correto e conciso",
+      "notas": "Nenhuma falha. Respostas diretas, sem verbosidade."
+    },
+    "qwen3.5:9b (think default)": {
+      "tarefas_codigo": "2/4 PASSA",
+      "tempo_por_tarefa_s": "54 a 131",
+      "falhas": "normalizar_nave e extrair_matches devolveram resposta VAZIA: os 3000 tokens de orcamento foram todos consumidos em 'thinking' (9k-11k chars) sem nunca chegar a resposta",
+      "notas": "Inutilizavel para tarefas rapidas do hermes em modo default."
+    },
+    "qwen3.5:9b (think=false)": {
+      "tarefas_codigo": "3/4 PASSA",
+      "velocidade_media_tok_s": 62.0,
+      "tempo_por_tarefa_s": "3.3 a 5.1",
+      "falhas": "flags_ativas: gerou 'flags & (1 << bit)' em vez de 'flags & bit' — confundiu mascara de bits com posicao de bit. O codigo compila e corre sem erro, so devolve resultados ERRADOS. Exemplo perfeito de alucinacao plausivel que so o gate de validacao apanha.",
+      "resumo_log": "bom, ligeiramente mais florido que o coder",
+      "notas": "Rapido sem thinking, mas menos fiavel em codigo."
+    }
+  },
+  "decisao": {
+    "default_codigo": "qwen2.5-coder:14b",
+    "default_texto_resumos": "qwen3.5:9b com think=false (ou o coder, que tambem resumiu bem)",
+    "regra": "Nunca usar qwen3.5:9b em modo thinking para tarefas do hermes; nunca aceitar codigo de qualquer modelo local sem validacao (py_compile + teste), como demonstrado pelo bug do flags_ativas"
+  }
+}

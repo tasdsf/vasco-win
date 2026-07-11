@@ -1,0 +1,14 @@
+Lista de Ações "Cegas" (Macros de Teclado)
+Selecionar Destino: Atalhos pelo painel de navegação esquerdo (ex: 1 -> Direita -> Espaço -> Espaço).
+
+Auto-undocking: Sequência de teclas para selecionar "Auto-Launch" no menu da estação e esperar um tempo fixo (ou ler o log).
+
+Acionar o Salto (FSD): Pressionar a tecla de atalho do Frame Shift Drive (ex: J).
+
+Selecionar Auto-pilot (Supercruise Assist): Sequência no painel esquerdo assim que entra no sistema de destino.
+
+Acionar Boost: Pressionar a tecla de atalho (ex: Tab) para afastar da estação mais rápido.
+
+Pedir Autorização de Pouso: Quando a menos de 7.5km, sequência rápida no painel esquerdo (Contatos -> Request Docking).
+
+Velocidade Zero (Auto-dock): Pressionar a tecla de atalho de 0% de throttle (ex: X) para a nave assumir a aterragem.

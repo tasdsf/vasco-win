@@ -1,0 +1,282 @@
+# 📋 LISTA COMPLETA - BOTÕES E ÁREAS DE ECRÃ POR SCRIPT
+# =================================================================================================
+
+================================================
+=== SCRIPT: COMPRARV2.PY (COMPRA FUJIN TEA) ===
+================================================
+  
+🎮 TECLAS ATIVADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • s    →  Navegar para baixo
+  • w    →  Navegar para cima
+  • space → Selecionar botão
+  • d    →  Mover seleção para direita
+  • backspace → Sair de menu
+  
+🖥️ ÁREAS/TEMPLATES DO ECRÃ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • SERVICOS    →  Botão abrir serviços da estação
+  • MARKET OFF  →  Mercado fechado
+  • MARKET ON   →  Mercado aberto
+  • BUY ON      →  Botão COMPRAR
+  • RARE ON     →  Item FUJIN TEA raro encontrado
+  • EXIT        →  Fechar mercado
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+================================================
+=== SCRIPT: SELECT_TARGET_CARRIER.PY (SELECIONAR ZAHIR) ===
+================================================
+
+
+🎮 TECLAS ATIVADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • 1    →  Abrir painel de navegação
+  • q    →  Navegar nas abas
+  • d    →  Mover seleção para direita
+  • s    →  Mover seleção baixa
+  • space → Confirmar seleção do Carrier
+  
+🖥️ ÁREAS/TEMPLATES DO ECRÃ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • NAV    →  Aba de navegação
+  • ZAHIR  →  Nome do Fleet Carrier
+  • LOCKED →  Destino bloqueado
+  • UNLOCKED → Destino desbloqueado
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+================================================
+=== SCRIPT: UNDOCKINGV1.PY (SAIR DA ESTAÇÃO AGORA) ===
+================================================
+
+
+🎮 TECLAS ATIVADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • space → Ativar Auto-Launch
+  • w    →  Navegar para cima
+  • s    →  Navegar para baixo
+  • tab →  Impulso (BOOST)
+  • backspace → Voltar cockpit
+  
+🖥️ ÁREAS/TEMPLATES DO ECRÃ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • AUTO_LAUNCH    →  Painel de auto-ejeto
+  • AUTO_LAUNCH_PROGRESS → Progresso da saída
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+================================================
+=== SCRIPT: OLHO.PY (AFINAÇÃO MANUAL DE MIRA) ===
+================================================
+
+
+🎮 TECLAS ATIVADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • w    →  Mover para cima
+  • s    →  Mover para baixo
+  • a    →  Mover para esquerda
+  • d    →  Mover para direita
+  • space → Ativar/Desativar bot manual
+  
+🖥️ ÁREAS/TEMPLATES DO ECRÃ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • BOA AZUL CENTRADA →  Mira objetivo (bola azul)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+================================================
+=== SCRIPT: SUPERCruise_ASSIST.PY (VELOCIDADE MÁXIMA) ===
+================================================
+
+
+🎮 TECLAS ATIVADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • j    →  Abrir painel supercruise
+  • .    →  Ativar supercruise
+  • x    →  Fechar motor
+  • 1    →  Abrir painel de sistemas
+  • space → Confirmar seleção
+  • d    →  Mover seleção
+  • tab →  Impulso
+  • backspace → Sair menu
+  
+🖥️ ÁREAS/TEMPLATES DO ECRÃ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • SUPERCRUISE PANEL → Painel de supercruise
+  • MODO TURBO → Ativa velocidade máxima
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+================================================
+=== SCRIPT: REQUEST_DOCKINGV1.PY (ENTRAR NA ESTAÇÃO) ===
+================================================
+
+
+🎮 TECLAS ATIVADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • x    →  Abrir painel docking
+  • 1    →  Navegar no painel
+  • e    →  Fechar painel
+  • space → Confirmar docking automático
+  • d    →  Mover seleção
+  • tab →  Impulso
+  • backspace → Voltar cockpit
+  
+🖥️ ÁREAS/TEMPLATES DO ECRÃ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • DOCKING PANEL → Painel de atracação
+  • AUTO-DOCKING → Atracção automática
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+================================================
+=== SCRIPT: VENDER.PY (VENDE FUJIN TEA) ===
+================================================
+
+
+🎮 TECLAS ATIVADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • space → Ativar/desativar visibilidade
+  • s    →  Mudar para aba SELL
+  • d    →  Entrar na lista de itens
+  • w    →  Mover para cima na lista
+  • space → Selecionar item
+  • backspace → Voltar cockpit (3x)
+  
+🖥️ ÁREAS/TEMPLATES DO ECRÃ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • MARKET OFF/ON   → Mercado aberto/fechado
+  • RARE_NOT_ON     → FUJIN TEA no inventário
+  • SELL_TAB        → Aba de venda
+  • EXIT            → Fechar mercado
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+================================================
+=== SCRIPT: SELECT_TARGET_STATION.PY (SELECIONAR ESTACÃO) ===
+================================================
+
+
+🎮 TECLAS ATIVADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • 1    →  Abrir painel de navegação
+  • q    →  Navegar nas abas
+  • d    →  Mover seleção direita
+  • s    →  Mover seleção baixa
+  • space → Confirmar seleção
+  
+🖥️ ÁREAS/TEMPLATES DO ECRÃ:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  • NAV    →  Aba de navegação
+  • ESTACÃO →  Nome da estação original
+  • LOCKED →  Destino bloqueado
+  • UNLOCKED → Destino desbloqueado
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+================================================
+=== RESUMO VISUAL DO FLUXO COMPLETO ===
+================================================
+
+```
+[CICLO: ESTACÃO → ZAHIR → ESTACÃO]
+
+1. COMPRARV2.PY:
+   ┌──────┬───────────────────────────┬────┐
+   │ s,w   │   Entrar Serviços/Market │    │
+   │ d     │   Procurar FUJIN TEA     │    │
+   │ space │   Confirmar Compra       │    │
+   │ backspace │ Voltar Cockpit          │    │
+   └───────┴───────────┴──────────────┴────┘
+
+2. SELECT_TARGET_CARRIER.PY:
+   ┌──────┬─────────────────────────┬────┐
+   │ 1,q  │   Abrir Navegação       │    │
+   │ d,s  │   Selecionar ZAHIR      │    │
+   │ space│   Confirmar Lock        │    │
+   └──────┴───────────┴───────────┬────┘
+
+3. UNDOCKINGV1.PY:
+   ┌────┬───────────────────────────────┬────┐
+   │ space │ Auto-Launch Ativado              │
+   │ w,s  │  Navegar painel              │
+   │ tab  │  Impulso (BOOST)              │
+   └──────┴──────────────────────┬─────────┴────┘
+
+4. OLHO.PY:
+   ┌────┬────────────────────┬────┐
+   │ w,s,a,d │  Ajuste Mira │    │
+   └─────────┴──────────────┴────┘
+
+5. SUPERCruise_ASSIST.PY:
+   ┌────┬─────────────────────┬────┐
+   │ j  │  Abrir Super Cruise │    │
+   │ . │  Ativar Turbo       │    │
+   │ x │  Cortar Motor       │    │
+   └────┴───────────────────┴────┘
+
+6. REQUEST_DOCKINGV1.PY:
+   ┌────┬──────────────────────┬────┐
+   │ x  │  Painel Docking      │    │
+   │ 1  │  Navegar em Painel  │    │
+   │ space │ Confirmar Dock   │    │
+   └─────┴──────────────────┴───┘
+
+7. VENDER.PY:
+   ┌────┬──────────────────────┬────┐
+   │ s  │  Abrir aba SELL    │    │
+   │ d,w│  Procurar Item     │    │
+   │ space │ Vender Item     │    │
+   │backspace│ Voltar Cockpit│    │
+   └─────┴──────────────────┴────┘
+
+8. SELECT_TARGET_STATION.PY:
+   ┌──┬─────────────────────────┬────┐
+   │ 1│   Navegação             │    │
+   │ q│   Selecionar Estação   │    │
+   │ s│   Confirmar Lock       │    │
+   └──┴────────────────────┬───┴────┘
+
+9. UNDOCKINGV1.PY (2ª VEZ):
+   ┌───┬──────────────────────────┬────┐
+   │space│  Auto-Launch           │    │
+   │w,s │  Navegar                │    │
+   │tab │  Impulso                │    │
+   └─────┴────────────────────┬───┴────┘
+
+10. OLHO.PY (2ª VEZ):
+   ┌────┬──────────────────────┬────┐
+   │ w,s,a,d │  Ajuste Mira   │    │
+   └─────────┴───────────────┴────┘
+
+11. SUPERCruise_ASSIST.PY (2ª VEZ):
+   ┌───┬───────────────────────┬────┐
+   │ j │  Abrir Super Cruise   │    │
+   │ . │  Turbo                │    │
+   │ x │  Fechar Motor         │    │
+   └───┴──────────────────────┴────┘
+
+12. REQUEST_DOCKINGV1.PY (2ª VEZ):
+   ┌─┬─────────────────────────┬────┐
+   │ x│  Painel Docking        │    │
+   │ 1│  Navegar em Painel    │    │
+   │space│  Confirmar Dock    │    │
+   └───┴─────────────────────┴────┘
+       │
+       ▼
+   [VOLTA AO INÍCIO - CICLO SE REPETE]
+```
+
+
+---
+*Documento gerado automaticamente - Elite Dangerous Automation Scripts*
+*Última edição: 2026*

@@ -1,0 +1,149 @@
+# 🎮 DIAGRAMA DE FLUXO - CICLO AUTOMATIZAÇÃO ELITE DANGEROUS
+# =================================================================================================
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                     CICLO DE NEGÓCIOS: FUJIN TEA (ESTACÃO → ZAHIR → ESTACÃO)                     │
+│ ================================================================================================= │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         1️⃣  COMPRA NA ESTAÇÃO ATUAL                                              │    │
+│  ├─ Teclas: [s, w, space, d, backspace]                                                 │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • SERVICES → Abra o menu holográfico                                                │    │
+│  │   • MARKET_ON/ON → Abre o mercado de commodities                                      │    │
+│  │   • BUY ON → Botão de compra                                                         │    │
+│  │   • RARE_ON → Item FUJIN TEA raro encontrado                                          │    │
+│  │   • EXIT → Fechar mercado                                                             │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Voa para Fleet Carrier Zahir]                                                                 │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │        2️⃣  SELECIONAR DESTINO (Carrier Zahir)                                   │    │
+│  ├─ Teclas: [1, q, d, s, space]                                                         │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • NAV → Aba de navegação                                                           │    │
+│  │   • ZAHIR → Nome do Fleet Carrier                                                    │    │
+│  │   • LOCKED/UNLOCKED → Estado do destino                                              │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Sair da Estação]                                                                           │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         3️⃣  SAI DA ESTAÇÃO AGORA (AUTO LAUNCH)                                  │    │
+│  ├─ Teclas: [space, w, s, tab, backspace]                                              │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • AUTO_LAUNCH → Painel de auto-ejeto                                               │    │
+│  │   • AUTO_LAUNCH_PROGRESS → Progresso da saída                                         │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Afinamento da Mira Manual]                                                                  │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         4️⃣  AFINAÇÃO DA MIRA (Olho.py - AJUDA MANUAL)                             │    │
+│  ├─ Teclas: [w, s, a, d, space]                                                         │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • BOA AZUL CENTRADA → Objetivo de mira (bola azul)                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Velocidade Máxima]                                                                            │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         5️⃣  VELOCIDADE MÁXIMA SUPERCRUISE (Supercruise Assit)                   │    │
+│  ├─ Teclas: [j, ., x, 1, space, d, tab, backspace]                                      │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • SUPERCRUISE → Painel de supercruise                                              │    │
+│  │   • MODO DE VELOCIDADE MÁXIMA → Turbo                                                │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Entrada na Estação/Carrier]                                                                   │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         6️⃣  ENTRAR NA ESTAÇÃO/ZAHIR (Docking)                                 │    │
+│  ├─ Teclas: [x, 1, space, e, d, backspace]                                             │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • DOCKING PANEL → Painel de atracação                                              │    │
+│  │   • AUTO-DOCKING → Atracção automática                                               │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Venda]                                                                                        │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         7️⃣  VEDA FUJIN TEA NO CARRIER ZAHIR (Vender.py)                       │    │
+│  ├─ Teclas: [space, s, d, w, backspace]                                                │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • MARKET_ON → Mercado aberto                                                       │    │
+│  │   • SELL_TAB → Aba de venda                                                          │    │
+│  │   • RARE_NOT_ON → FUJIN TEA no inventário                                            │    │
+│  │   • EXIT → Fechar mercado                                                             │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Selecionar Estação Original]                                                                   │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         8️⃣  SELECIONAR ESTAÇÃO ORIGINAL (Retorno)                            │    │
+│  ├─ Teclas: [1, q, d, s, space]                                                         │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • NAV → Aba de navegação                                                           │    │
+│  │   • ESTACÃO → Nome da estação original                                               │    │
+│  │   • LOCKED/UNLOCKED → Estado do destino                                              │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Sair do Carrier Zahir]                                                                     │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         9️⃣  SAI DO CARRIER ZAHIR (AUTO LAUNCH 2ª VEZ)                        │    │
+│  ├─ Teclas: [space, w, s, tab, backspace]                                                │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • AUTO_LAUNCH → Painel de auto-ejeto                                               │    │
+│  │   • AUTO_LAUNCH_PROGRESS → Progresso da saída                                         │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Afinamento da Mira Manual]                                                                  │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │          🔟  AFINAÇÃO DA MIRA (Olho.py - AJUDA MANUAL 2ª VEZ)           │    │
+│  ├─ Teclas: [w, s, a, d, space]                                                         │    │
+│  ├─ Áreas de Ecrã:                                                                       │    │
+│  │   • BOA AZUL CENTRADA → Objetivo de mira (bola azul)                                 │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ↓ [Velocidade Máxima - Retorno]                                                                  │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         1️⃣1️⃣  VELOCIDADE MÁXIMA (Supercruise Assit 2ª VEZ)                   │    │
+│  ├─ Teclas: [j, ., x, 1, space, d, tab, backspace]                                      │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  ┌─────────────────────────────────────────────────────────────────────────────────────────┐    │
+│  │         1️⃣2️⃣  ENTRAR NA ESTAÇÃO ORIGINAL (Docking 2ª VEZ)                      │    │
+│  ├─ Teclas: [x, 1, space, e, d, backspace]                                             │    │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                                                                   │
+│  └─────────────────────────────────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+## 📝 NOTAS:
+- **Teclas W/S/A/D**: Navegação manual (para cima/para baixo/esquerda/direita)
+- **SPACE**: Selecionar botões
+- **1**: Abrir painel de navegação
+- **BACKSPACE**: Voltar para cockpit
+- **TAB**: Impulso (BOOST)
+- **.** (ponto): Ativar supercruise
+
+---
+## 📂 SCRIPTS ENVOLVIDOS:
+1. comprarv2.py
+2. select_target_carrier.py
+3. undockingv1.py
+4. olho.py
+5. supercruise_assist.py
+6. request_dockingv1.py
+7. vender.py
+8. select_target_station.py
+
+---
+*Geração automática - Elite Dangerous Automation Scripts*

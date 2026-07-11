@@ -1,0 +1,80 @@
+{
+    "sistemas": {
+        "Fujin": {
+            "raio_planeta_m": 5969000,
+            "margem_atmosfera_m": 50000,
+            "semi_eixo_estacao_m": 25856000,
+            "semi_eixo_carrier_m": 37100000,
+            "periodo_estacao_s": 43305,
+            "periodo_carrier_s": 74431,
+            "nota": "Futen Spaceport <-> Fleet Carrier Zahir, planeta Fujin 5",
+            "observacoes": [
+                {
+                    "timestamp_utc": "2026-07-09T01:31:31",
+                    "estado": "visivel",
+                    "nota": "Observado manualmente em 2026-07-09 01:31:31 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-09T03:11:18",
+                    "estado": "visivel",
+                    "nota": "Observado manualmente em 2026-07-09 03:11:18 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-09T03:17:15",
+                    "estado": "visivel",
+                    "nota": "Observado manualmente em 2026-07-09 03:17:15 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T05:32:50",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 05:32:50 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T05:40:53",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 05:40:53 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T05:41:24",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 05:41:24 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T05:42:39",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 05:42:39 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T06:20:25",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 06:20:25 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T06:47:25",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 06:47:25 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T06:57:39",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 06:57:39 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T07:14:03",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 07:14:03 UTC"
+                }
+            ]
+        },
+        "Kamitra": {
+            "raio_planeta_m": null,
+            "margem_atmosfera_m": 50000,
+            "semi_eixo_estacao_m": null,
+            "semi_eixo_carrier_m": null,
+            "periodo_estacao_s": null,
+            "periodo_carrier_s": null,
+            "nota": "TODO: por preencher (raio do planeta e orbitas da estacao/carrier em Kamitra). Enquanto estes campos forem null, o LOS checker salta a verificacao neste sistema em vez de usar os numeros do Fujin.",
+            "observacoes": []
+        }
+    }
+}

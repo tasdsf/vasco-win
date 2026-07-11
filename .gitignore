@@ -1,0 +1,15 @@
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Credenciais / segredos
+*.env
+.env.*
+*credentials*
+*secret*
+*.key
+*.pem

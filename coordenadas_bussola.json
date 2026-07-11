@@ -1,0 +1,44 @@
+{
+    "Mandalay": {
+        "MONITOR_CONFIG": {
+            "top": 1228,
+            "left": 954,
+            "width": 84,
+            "height": 94
+        },
+        "CX_NEUTRO": 42,
+        "CY_NEUTRO": 47,
+        "LIMIAR_THRESH": 162
+    },
+    "Hauler": {
+        "MONITOR_CONFIG": {
+            "top": 1210,
+            "left": 918,
+            "width": 90,
+            "height": 100
+        },
+        "CX_NEUTRO": 47,
+        "CY_NEUTRO": 48,
+        "LIMIAR_THRESH": 130
+    },
+    "Cobra Mk V": {
+        "MONITOR_CONFIG": {
+            "top": 1204,
+            "left": 905,
+            "width": 96,
+            "height": 106
+        },
+        "CX_NEUTRO": 48,
+        "CY_NEUTRO": 53
+    },
+    "Mediumtransport01": {
+        "MONITOR_CONFIG": {
+            "top": 1187,
+            "left": 973,
+            "width": 76,
+            "height": 86
+        },
+        "CX_NEUTRO": 38,
+        "CY_NEUTRO": 43
+    }
+}
