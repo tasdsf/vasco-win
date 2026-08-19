@@ -9,6 +9,20 @@ import numpy as np
 import pyttsx3
 import pygetwindow as gw
 import time
+from datetime import datetime as _dt_hora
+
+# Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
+# usados para espaçamento visual no terminal).
+_print_original = print
+def print(*args, **kwargs):
+    if args and isinstance(args[0], str):
+        _texto = args[0]
+        _prefixo_nl = ""
+        while _texto.startswith("\n"):
+            _prefixo_nl += "\n"
+            _texto = _texto[1:]
+        args = (f"{_prefixo_nl}[{_dt_hora.now().strftime('%H:%M:%S')}] {_texto}",) + args[1:]
+    _print_original(*args, **kwargs)
 
 # ==========================================
 # 0. LOGGING E INFRAESTRUTURA

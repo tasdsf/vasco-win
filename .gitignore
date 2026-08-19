@@ -6,6 +6,10 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Scratch / lixo temporario
+temp/
+_to_delete/
+
 # Credenciais / segredos
 *.env
 .env.*

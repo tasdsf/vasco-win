@@ -13,20 +13,6 @@ import sys
 import pyttsx3
 import winsound
 import pygetwindow as gw  # <-- DEPENDÊNCIA PARA FOCO SEGURO AO NÍVEL DO S.O.
-from datetime import datetime as _dt_hora
-
-# Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
-# usados para espaçamento visual no terminal).
-_print_original = print
-def print(*args, **kwargs):
-    if args and isinstance(args[0], str):
-        _texto = args[0]
-        _prefixo_nl = ""
-        while _texto.startswith("\n"):
-            _prefixo_nl += "\n"
-            _texto = _texto[1:]
-        args = (f"{_prefixo_nl}[{_dt_hora.now().strftime('%H:%M:%S')}] {_texto}",) + args[1:]
-    _print_original(*args, **kwargs)
 
 # ==========================================
 # 0. LOGGING, SOM E INFRAESTRUTURA
@@ -276,54 +262,27 @@ def localizar_alvo_hud(sct):
     img_bgra = np.array(sct.grab(MONITOR_HUD))
     img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
 
+    # Testa todos os templates do alvo e fica com o melhor match do frame
+    max_val, max_loc, melhor_tpl, melhor_nome = -1.0, (0, 0), None, "?"
+    for nome_tpl, tpl in templates_alvo_hud.items():
+        res = cv2.matchTemplate(img_bgr, tpl, cv2.TM_CCOEFF_NORMED)
+        _, val, _, loc = cv2.minMaxLoc(res)
+        if val > max_val:
+            max_val, max_loc, melhor_tpl, melhor_nome = val, loc, tpl, nome_tpl
+
     cx_hud = MONITOR_HUD["width"] // 2
     cy_hud = MONITOR_HUD["height"] // 2
 
-    # ==========================================
-    # 1. TENTATIVA PRINCIPAL (TARGET.png)
-    # ==========================================
-    res_high = cv2.matchTemplate(img_bgr, templates_alvo_hud["TARGET.png"], cv2.TM_CCOEFF_NORMED)
-    _, val_high, _, loc_high = cv2.minMaxLoc(res_high)
-
-    # Se o High for aceitável, abortamos a pesquisa do Low. Histerese ativada.
-    if val_high >= 0.68:
-        h, w = templates_alvo_hud["TARGET.png"].shape[:2]
-        tx = loc_high[0] + (w // 2)
-        ty = loc_high[1] + (h // 2)
+    if max_val >= 0.70:
+        h, w = melhor_tpl.shape[:2]
+        tx = max_loc[0] + (w // 2)
+        ty = max_loc[1] + (h // 2)
 
         dx = tx - cx_hud
         dy = ty - cy_hud
-        return True, dx, dy, img_bgr, val_high, "TARGET"
+        return True, dx, dy, img_bgr, max_val, melhor_nome
 
-    # ==========================================
-    # 2. FALLBACK (target_low.png)
-    # ==========================================
-    res_low = cv2.matchTemplate(img_bgr, templates_alvo_hud["target_low.png"], cv2.TM_CCOEFF_NORMED)
-    _, val_low, _, loc_low = cv2.minMaxLoc(res_low)
-
-    if val_low >= 0.65:
-        h, w = templates_alvo_hud["target_low.png"].shape[:2]
-        tx = loc_low[0] + (w // 2)
-        ty = loc_low[1] + (h // 2)
-
-        # CORREÇÃO DO OFFSET GEOMÉTRICO (O TEU CÁLCULO)
-        # Como o target_low foi recortado mais "abaixo e à direita", o centro dele dá um "salto" para a frente.
-        # Ajusta estas duas variáveis para cravar os dois centros no mesmo píxel exato.
-        OFFSET_DIREITA = 2  # Subtrai X píxeis do eixo X
-        OFFSET_ABAIXO = 2   # Subtrai Y píxeis do eixo Y
-
-        tx -= OFFSET_DIREITA
-        ty -= OFFSET_ABAIXO
-
-        dx = tx - cx_hud
-        dy = ty - cy_hud
-        return True, dx, dy, img_bgr, val_low, "target_low"
-
-    # Se ambos falharem, devolve o maior score para efeitos de telemetria visual
-    max_val_falha = max(val_high, val_low)
-    melhor_nome = "TARGET" if val_high > val_low else "target_low"
-    
-    return False, 0, 0, img_bgr, max_val_falha, melhor_nome
+    return False, 0, 0, img_bgr, max_val, melhor_nome
 
 # ==========================================
 # 4. CONTROLADORES DE VOO CX_NEUTRO

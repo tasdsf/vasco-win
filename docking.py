@@ -12,6 +12,20 @@ import pyttsx3
 import winsound
 import pygetwindow as gw
 import time
+from datetime import datetime as _dt_hora
+
+# Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
+# usados para espaçamento visual no terminal).
+_print_original = print
+def print(*args, **kwargs):
+    if args and isinstance(args[0], str):
+        _texto = args[0]
+        _prefixo_nl = ""
+        while _texto.startswith("\n"):
+            _prefixo_nl += "\n"
+            _texto = _texto[1:]
+        args = (f"{_prefixo_nl}[{_dt_hora.now().strftime('%H:%M:%S')}] {_texto}",) + args[1:]
+    _print_original(*args, **kwargs)
 
 # ==========================================
 # 0. LOGGING E INFRAESTRUTURA
@@ -20,11 +34,16 @@ diretorio_atual = os.path.dirname(os.path.abspath(__file__))
 pasta_logs = os.path.join(diretorio_atual, "logs")
 os.makedirs(pasta_logs, exist_ok=True)
 
-logging.basicConfig(
-    filename=os.path.join(pasta_logs, "r2d2_combined.log"),
-    level=logging.ERROR,
-    format='%(asctime)s - [DOCKING] - %(levelname)s - %(message)s'
-)
+# Logger proprio (nao usa logging.basicConfig -- com varios scripts no mesmo
+# processo, so o primeiro basicConfig chamado ganha, e todos os outros ficam
+# com o prefixo errado no log partilhado).
+_logger = logging.getLogger("docking")
+_logger.setLevel(logging.ERROR)
+if not _logger.handlers:
+    _fh = logging.FileHandler(os.path.join(pasta_logs, "r2d2_combined.log"), encoding='utf-8')
+    _fh.setFormatter(logging.Formatter('%(asctime)s - [DOCKING] - %(levelname)s - %(message)s'))
+    _logger.addHandler(_fh)
+    _logger.propagate = False
 
 # Motor de Voz e Som
 engine = pyttsx3.init()
@@ -41,7 +60,7 @@ def tocar_alarme_erro():
 
 def abortar_com_erro(mensagem):
     print(f"\n[FATAL] {mensagem}")
-    logging.error(mensagem)
+    _logger.error(mensagem)
     tocar_alarme_erro()
     falar("Critical error during docking sequence. Manual intervention required.")
     # É ESTE sys.exit(1) QUE AVISA O VASCO.PY QUE HOUVE UMA FALHA!
@@ -242,7 +261,7 @@ def solicitar_docking():
         if not aba_encontrada:
             msg = "[ERRO] Não detetei a aba Contacts. Tentando reiniciar ciclo..."
             print(msg)
-            logging.warning(msg)
+            _logger.warning(msg)
             pydirectinput.press('1')
             time.sleep(2)
             continue 
@@ -267,41 +286,27 @@ def solicitar_docking():
         time.sleep(1.5)
 
         if clicou:
-            print("[LOG] Validação instantânea do pipeline Request -> Granted...")
-            
-            permissao_concedida = False
-            for _ in range(8):
-                eventos_imediatos = ler_novos_eventos(ancora_log)
-                eventos_nomes = [e.get('event') for e in eventos_imediatos]
-                
-                if 'DockingGranted' in eventos_nomes:
-                    print("[SUCESSO] Pedido aceite pela torre de controlo (DockingGranted)!")
-                    permissao_concedida = True
-                    break
-                elif 'DockingDenied' in eventos_nomes:
-                    print("[ERRO] Pedido negado pela torre (Estação cheia/Fila).")
-                    pydirectinput.press('x') 
-                    pydirectinput.press('tab') 
-                    time.sleep(15.0)
-                    break
-                time.sleep(0.5)
-
-            if permissao_concedida:
-                if aguardar_confirmacao_docking(ancora_log):
-                    print("\n[SUCESSO] Operação de docking totalmente finalizada.")
-                    return True
-                else:
-                    abortar_com_erro("A manobra falhou ou foi abortada a meio do voo.")
+            # Pedido enviado: a partir daqui a nave pode entrar em manobras
+            # automáticas de aproximação (acelerações/travagens assim que o
+            # DockingComputer assume) que tornam qualquer template visual
+            # pouco fiável -- e reabrir o painel para tentar confirmar
+            # visualmente arrisca acertar sem querer no botão de pedido outra
+            # vez, o que aborta o docking a meio do percurso e deixa a nave
+            # parada até intervenção manual. Por isso, uma vez enviado o
+            # pedido, não se manda mais nenhum input: só se monitoriza o
+            # journal (Granted/Denied/Cancelled/Docked) até ao fim, em vez de
+            # reiniciar a tentativa ao fim de uma janela curta de espera.
+            print("[LOG] Pedido enviado. A monitorizar o journal até ao pouso (sem mais inputs)...")
+            if aguardar_confirmacao_docking(ancora_log):
+                print("\n[SUCESSO] Operação de docking totalmente finalizada.")
+                return True
             else:
-                msg = "[AVISO] Torre não emitiu 'Granted'. A estação pode estar cheia."
-                print(msg)
-                logging.warning(f"Tentativa {tentativa} falhou: Granted não recebido.")
-                falar(f"Docking request denied. Initiating attempt {tentativa + 1}.")
-                time.sleep(4)
+                abortar_com_erro("Pedido de docking enviado mas não confirmado (negado, cancelado ou "
+                                  "timeout à espera do pouso). Intervenção manual necessária.")
         else:
             msg = "[ERRO] Botão de request não foi localizado."
             print(msg)
-            logging.warning(f"Tentativa {tentativa} falhou: Botão Request Docking ausente.")
+            _logger.warning(f"Tentativa {tentativa} falhou: Botão Request Docking ausente.")
             falar("Request button not found.")
             time.sleep(2)
 

@@ -27,7 +27,7 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 logging.basicConfig(
     filename=os.path.join(LOGS_DIR, "r2d2_combined.log"),
-    level=logging.ERROR,
+    level=logging.INFO,
     format='%(asctime)s - [SUPERCRUISE] - %(levelname)s - %(message)s'
 )
 
@@ -48,10 +48,10 @@ VISUAL_DEBUG = False
 
 def inicializar_infraestrutura():
     print("[SISTEMA] A configurar foco no jogo...")
-    
+
     focar_jogo_seguro()
     time.sleep(0.5)
-            
+
     if VISUAL_DEBUG:
         cv2.namedWindow(NOME_JANELA, cv2.WINDOW_NORMAL)
         with mss.mss() as sct:
@@ -69,18 +69,18 @@ def focar_jogo_seguro():
     try:
         # Procura a janela pelo título (no Elite geralmente é "Elite - Dangerous (CLIENT)")
         janelas = gw.getWindowsWithTitle("Elite - Dangerous (CLIENT)")
-        
+
         if janelas:
             janela_elite = janelas[0]
             # Traz a janela para a frente
-            janela_elite.activate() 
+            janela_elite.activate()
             time.sleep(0.5)
             print("[OK] Jogo focado com sucesso e em segurança.")
             return True
         else:
             print("[ERRO] Janela do Elite Dangerous não encontrada!")
             return False
-            
+
     except Exception as e:
         print(f"[AVISO] Falha ao forçar foco via OS: {e}")
         return False
@@ -144,7 +144,7 @@ def procurar_template(template, nome_label, monitor, threshold=0.75, debug=False
             cv2.putText(img_bgr, f"{nome_label}: {max_val:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, cor, 2)
             cv2.imshow(NOME_JANELA, img_bgr)
             cv2.waitKey(1)
-            
+
         return encontrou
 
 def ler_telemetria(debug=False):
@@ -161,11 +161,92 @@ def ler_telemetria(debug=False):
             print(f"    [FLAGS] Falha a ler {STATUS_FILE}: {e}")
         return 0
 
+def ler_destino_telemetria(debug=False):
+    try:
+        with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            destino = data.get("Destination")
+            if debug:
+                print(f"    [DESTINO] {destino if destino else '(sem destino de navegacao gravado)'}")
+            return destino
+    except Exception as e:
+        if debug:
+            print(f"    [DESTINO] Falha a ler {STATUS_FILE}: {e}")
+        return None
+
+# ==========================================
+# 2b. REGISTO AUTOMÁTICO DE OBSERVAÇÃO LOS
+# ==========================================
+def registar_los_visivel_auto():
+    """ Regista na BD partilhada (ver .env.example) uma observação LOS
+    'visivel' automática: um salto de supercruise iniciado com sucesso
+    implica que o alvo estava visível (sem o planeta no meio), e a nave
+    ainda está junto à estação/carrier de partida.
+
+    origem='auto-win': distingue estas observações automáticas das manuais
+    ('win' neste portátil, 'linux' no PC Nobara) — permite filtrá-las na
+    regressão se um dia levantarem suspeitas.
+
+    NUNCA pode partir o voo: dependências em falta, .env por configurar,
+    BD inacessível ou qualquer outra falha são apenas reportadas e
+    ignoradas — o supercruise continua na mesma. """
+    try:
+        from datetime import datetime, timezone
+        from dotenv import load_dotenv
+        import psycopg2
+        from los_checker import obter_sistema_atual
+
+        load_dotenv(os.path.join(PROJECT_DIR, ".env"))
+        host = os.environ.get("R2D2_DB_HOST")
+        password = os.environ.get("R2D2_DB_PASSWORD")
+        if not host or not password:
+            return  # .env não configurado nesta máquina — segue sem registar
+
+        ed_log_dir = os.path.join(os.environ['USERPROFILE'], 'Saved Games',
+                                  'Frontier Developments', 'Elite Dangerous')
+        sistema = obter_sistema_atual(ed_log_dir)
+        if not sistema:
+            print("[LOS-AUTO] Sistema desconhecido — observação não registada.")
+            return
+
+        conn = psycopg2.connect(
+            host=host,
+            port=os.environ.get("R2D2_DB_PORT", "5432"),
+            dbname=os.environ.get("R2D2_DB_NAME", "ED"),
+            user=os.environ.get("R2D2_DB_USER", "r2d2"),
+            password=password,
+            connect_timeout=4,
+        )
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO los_observacoes (sistema, timestamp_utc, estado, nota, origem) "
+                    "VALUES (%s, %s, %s, %s, %s);",
+                    (sistema, datetime.now(timezone.utc), "visivel",
+                     "automatica: salto supercruise iniciado com sucesso em modo auto "
+                     "(pelo sim pelo nao: pode ter tido ajuda do utilizador)",
+                     "auto-win"))
+        finally:
+            conn.close()
+        print(f"[LOS-AUTO] Observação 'visivel' registada na BD para '{sistema}'.")
+    except Exception as e:
+        print(f"[LOS-AUTO] Falha ao registar observação (ignorada, o voo continua): {e}")
+
 # ==========================================
 # 3. FASE 0: SALTO E TELEMETRIA
 # ==========================================
 def iniciar_salto_seguro():
     print("\n>>> FASE 0: Iniciar Salto (J)...")
+
+    destino = ler_destino_telemetria(debug=True)
+    destino_nome = destino.get("Name") if destino else None
+    match_locked = procurar_template(templates['locked'], "LOCKED_DESTINATION", MONITOR_CENTER, 0.75, debug=True)
+    match_unlocked = procurar_template(templates['unlocked'], "UNLOCKED_DESTINATION", MONITOR_CENTER, 0.75, debug=True)
+    msg_diag = (f"Pre-salto -> destino telemetria: {destino_nome}, "
+                f"template LOCKED_DESTINATION={match_locked}, UNLOCKED_DESTINATION={match_unlocked}")
+    print(f"[DIAGNOSTICO] {msg_diag}")
+    logging.info(msg_diag)
+
     print("[LOG] A enviar 'j' (iniciar salto) + 'right shift' (acelerar)...")
     pydirectinput.press('j')
     pydirectinput.press('shiftright')
@@ -200,6 +281,7 @@ def iniciar_salto_seguro():
     # 1. Confirmou que está a carregar
     if salto_confirmado == "carga":
         print("[OK] Motor FSD em carga confirmada pela telemetria.")
+        registar_los_visivel_auto()
         # Espera o salto acontecer
         pydirectinput.press('x')
         time.sleep(4.5)
@@ -208,6 +290,7 @@ def iniciar_salto_seguro():
     # 1b. Já não está a carregar porque o salto já teve sucesso entretanto
     if salto_confirmado == "supercruise":
         print("[OK] Já em Supercruise (a carga completou antes da leitura de telemetria).")
+        registar_los_visivel_auto()
         pydirectinput.press('x')
         return True
 
@@ -231,16 +314,31 @@ def iniciar_salto_seguro():
     pydirectinput.press('x')
     abortar_com_erro("Falha desconhecida ao iniciar o salto: FSD não confirma carga nem Supercruise, e nenhuma causa conhecida (Mass Lock / Hardpoints / Alinhamento) foi detetada.")
 
+def aguardar_supercruise_confirmado(timeout=30):
+    """Confirma pela telemetria (Status.json, flag SUPERCRUISE=0x10) que ja
+    estamos mesmo em supercruise antes de abrir o menu do assist -- sem isto
+    o menu pode ser aberto ainda em espaco normal/transicao."""
+    print("\n>>> A confirmar entrada em Supercruise pela telemetria...")
+    limite = time.time() + timeout
+    while time.time() < limite:
+        flags = ler_telemetria()
+        if bool(flags & STATUS_FLAGS["SUPERCRUISE"]):
+            print("[OK] Supercruise confirmado pela telemetria.")
+            return True
+        time.sleep(0.5)
+    abortar_com_erro(f"Timeout ({timeout}s). Supercruise nunca foi confirmado pela telemetria.")
+
+
 # ==========================================
 # 4. FASE 1: NAVEGAÇÃO MECÂNICA NO MENU
 # ==========================================
 def engatar_assistencia_menu():
     print("\n>>> FASE 1: Navegação no Painel Esquerdo...")
-    
+
     # Reduzir velocidade antes de mexer nos menus
-    pydirectinput.press('x')     
+    pydirectinput.press('x')
     pydirectinput.press('1')
-    pydirectinput.press('x') 
+    pydirectinput.press('x')
     time.sleep(1)
 
     # 1. Achar a ABA NAV
@@ -251,9 +349,9 @@ def engatar_assistencia_menu():
             break
         pydirectinput.press('q')
         time.sleep(0.5)
-        
+
     if not nav_found:
-        pydirectinput.press('x') 
+        pydirectinput.press('x')
         pydirectinput.press('1')
         abortar_com_erro("Falha crítica ao tentar focar na aba de navegação.")
 
@@ -261,25 +359,23 @@ def engatar_assistencia_menu():
     print(">>> Focando no destino pré-selecionado (Space)...")
     pydirectinput.press('space')
     time.sleep(0.8)
-    
+
     print(">>> Movendo para o botão Supercruise Assist (D)...")
     pydirectinput.press('d')
     time.sleep(0.5)
-    
+
     print(">>> Ativando Assistência (Space)...")
     pydirectinput.press('space')
     time.sleep(1.0)
-    
+
     pydirectinput.press('1') # Fecha painel
     print(">>> Painel fechado. Voltando ao Cockpit.")
 
 # ==========================================
 # 5. FASE 2: VIAGEM E CHEGADA
 # ==========================================
-def monitorar_viagem():    
+def monitorar_viagem():
     print("\n>>> FASE 2: Viagem em Supercruise...")
-    falar("Supercruise assist engaged. Monitoring flight path.")
-    
     # Watchdog: Confirmar HUD
     contagem_limpo = 0
     timeout_assist = time.time() + 60
@@ -287,51 +383,78 @@ def monitorar_viagem():
         if time.time() > timeout_assist:
             abortar_com_erro("Timeout (60s). Supercruise Assist não apareceu no HUD.")
         if not procurar_template(templates['assist_active'], "ASSIST ACTIVE", MONITOR_CENTER, 0.75):
-            contagem_limpo = 0 
+            contagem_limpo = 0
         else:
-            contagem_limpo += 1 
+            contagem_limpo += 1
         time.sleep(1)
+
+    # Assist confirmado visualmente (3 detecoes limpas) -- so agora anuncia.
+    falar("Supercruise assist engaged. Monitoring flight path.")
 
     # Viagem Longa
     print("A aguardar que o aviso de Assist desapareça (Chegada)...")
     contagem_limpo = 0
     timeout_viagem = time.time() + 1500 # 25 mins
-    
+
     while contagem_limpo < 3:
         flags = ler_telemetria()
         if bool(flags & STATUS_FLAGS["INTERDICTION"]):
             abortar_com_erro("ALERTA CRÍTICO: Interdição detetada durante viagem!")
-            
+
         if time.time() > timeout_viagem:
             abortar_com_erro("Timeout (25 mins). Viagem em supercruise excedeu o limite seguro.")
 
         if procurar_template(templates['assist_active'], "ASSIST ACTIVE", MONITOR_CENTER, 0.75):
-            contagem_limpo = 0 
+            contagem_limpo = 0
         else:
-            contagem_limpo += 1 
+            contagem_limpo += 1
         time.sleep(1)
 
     # Chegada
     print("\n>>> CHEGADA CONFIRMADA! A executar travagem e boost...")
     falar("Dropping from supercruise.")
-    
-    time.sleep(2.0)
-    pydirectinput.press('tab') 
+
+    print("[LOG] A aguardar queda da flag SUPERCRUISE antes do boost...")
+    timeout_drop = time.time() + 10
+    while time.time() < timeout_drop:
+        flags_drop = ler_telemetria()
+        if not bool(flags_drop & STATUS_FLAGS["SUPERCRUISE"]):
+            print("[OK] Flag SUPERCRUISE caiu -- fora de Supercruise confirmado.")
+            break
+        time.sleep(0.5)
+    else:
+        print("[AVISO] Timeout (10s) a aguardar queda da flag SUPERCRUISE. A prosseguir na mesma.")
+
+    time.sleep(1.5)
+    flags_pre_boost = ler_telemetria(debug=True)
+    msg_pre_boost = f"Pre-boost -> ainda em Supercruise: {bool(flags_pre_boost & STATUS_FLAGS['SUPERCRUISE'])} (flags={hex(flags_pre_boost)})"
+    print(f"[TELEMETRIA] {msg_pre_boost}")
+    logging.info(msg_pre_boost)
+    pydirectinput.press('tab')
     time.sleep(15.0)
-    # pydirectinput.press('tab') 
+    flags_pos_boost = ler_telemetria(debug=True)
+    msg_pos_boost = f"Pos-boost -> ainda em Supercruise: {bool(flags_pos_boost & STATUS_FLAGS['SUPERCRUISE'])} (flags={hex(flags_pos_boost)})"
+    print(f"[TELEMETRIA] {msg_pos_boost}")
+    logging.info(msg_pos_boost)
+    # pydirectinput.press('tab')
     # time.sleep(15.0)
-    pydirectinput.press('x') 
+    pydirectinput.press('x')
     print(">>> Manobra concluída. A aguardar aproximação para docking.")
 
-if __name__ == "__main__":
+def executar():
     inicializar_infraestrutura()
 
     print("Alinha o nariz da nave com o destino. Iniciando em 1s...")
     time.sleep(1)
-    
+
     iniciar_salto_seguro()
+    aguardar_supercruise_confirmado()
     engatar_assistencia_menu()
     monitorar_viagem()
-        
+
     if VISUAL_DEBUG:
         cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    executar()

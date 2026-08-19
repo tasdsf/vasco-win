@@ -11,6 +11,20 @@ import numpy as np
 import pyttsx3
 import pygetwindow as gw
 import time
+from datetime import datetime as _dt_hora
+
+# Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
+# usados para espaçamento visual no terminal).
+_print_original = print
+def print(*args, **kwargs):
+    if args and isinstance(args[0], str):
+        _texto = args[0]
+        _prefixo_nl = ""
+        while _texto.startswith("\n"):
+            _prefixo_nl += "\n"
+            _texto = _texto[1:]
+        args = (f"{_prefixo_nl}[{_dt_hora.now().strftime('%H:%M:%S')}] {_texto}",) + args[1:]
+    _print_original(*args, **kwargs)
 
 # ==========================================
 # 0. LOGGING E INFRAESTRUTURA
@@ -91,7 +105,9 @@ templates_nomes = {
     'station': 'STATION.png',
     'station2': 'STATION1.png',
     'locked': 'LOCKED_DESTINATION.png',
-    'unlocked': 'UNLOCKED_DESTINATION.png'
+    'unlocked': 'UNLOCKED_DESTINATION.png',
+    'zahir_confirm': 'zahir_target_confirm.png',
+    'futen_confirm': 'futen_target_confirm.png'
 }
 
 templates = {}
@@ -249,7 +265,7 @@ def marcar_destino_dinamico():
     # linhas ~0.79-0.83. 0.88 era demasiado apertado e ficava acima do próprio
     # carrier; 0.85 mantém margem segura acima do ruído mais alto visto (0.83).
     # Station (mais ruído) 0.75.
-    threshold_matching = 0.86 if tipo_alvo == "carrier" else 0.75
+    threshold_matching = 0.88 if tipo_alvo == "carrier" else 0.80
     
     print(f"\n>>> FASE: Marcar Destino ({label_alvo})...")
     pydirectinput.press('1')
@@ -291,7 +307,20 @@ def marcar_destino_dinamico():
     time.sleep(1.0)
     pydirectinput.press('space')
     time.sleep(1.0)
-    
+
+    # Validação de alvo: confirma pelo título do popup que abriu que o alvo
+    # é mesmo o esperado (Zahir para carrier, Futen Spaceport para estação),
+    # antes de fazer lock. Calibrado com images/find_area.png (ecrã real de
+    # Futen Spaceport): o template correto (futen_target_confirm) bate a
+    # 0.976 nesse ecrã, o template errado (zahir_target_confirm) fica a
+    # 0.451 no mesmo ecrã -- margem ampla acima do limiar de 0.80. Falta
+    # calibração equivalente no sentido inverso (ecrã real do Zahir); assume-se
+    # por semelhança visual da UI (mesmo estilo de caixa/ícone/texto).
+    template_confirm = 'zahir_confirm' if tipo_alvo == "carrier" else 'futen_confirm'
+    nome_confirm = "ZAHIR" if tipo_alvo == "carrier" else "FUTEN SPACEPORT"
+    if not procurar_template(templates[template_confirm], f"CONFIRM {nome_confirm}", MONITOR_PANEL, 0.80, debug=True):
+        abortar_com_erro(f"Validação de alvo falhou: o popup aberto não confirma '{nome_confirm}' ({label_alvo}). Pode ter aberto o alvo errado -- lock cancelado.")
+
     # Verificação de Bloqueio (Lock)
     if procurar_template(templates['unlocked'], "UNLOCKED", MONITOR_PANEL, 0.80):
         pydirectinput.press('space')

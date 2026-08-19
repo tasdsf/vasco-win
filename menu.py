@@ -6,6 +6,19 @@ from logging.handlers import RotatingFileHandler
 import datetime
 import time
 
+# Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
+# usados para espaçamento visual no terminal).
+_print_original = print
+def print(*args, **kwargs):
+    if args and isinstance(args[0], str):
+        _texto = args[0]
+        _prefixo_nl = ""
+        while _texto.startswith("\n"):
+            _prefixo_nl += "\n"
+            _texto = _texto[1:]
+        args = (f"{_prefixo_nl}[{datetime.datetime.now().strftime('%H:%M:%S')}] {_texto}",) + args[1:]
+    _print_original(*args, **kwargs)
+
 # Mapeamento estrito dos scripts aos números de 1 a 8
 SCRIPTS = {
     "1": "comprar.py",

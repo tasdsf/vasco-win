@@ -63,6 +63,41 @@
                     "timestamp_utc": "2026-07-11T07:14:03",
                     "estado": "oclusos",
                     "nota": "Observado manualmente em 2026-07-11 07:14:03 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T07:24:02",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 07:24:02 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T08:04:20",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 08:04:20 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T08:10:18",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 08:10:18 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T08:21:59",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 08:21:59 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T08:23:39",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 08:23:39 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T08:39:16",
+                    "estado": "oclusos",
+                    "nota": "Observado manualmente em 2026-07-11 08:39:16 UTC"
+                },
+                {
+                    "timestamp_utc": "2026-07-11T08:52:28",
+                    "estado": "visivel",
+                    "nota": "Observado manualmente em 2026-07-11 08:52:28 UTC"
                 }
             ]
         },

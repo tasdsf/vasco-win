@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 """
-los_checker.py — Line-of-Sight Checker com calibração automática, por sistema.
+los_checker.py — Line-of-Sight Checker com AUTO-FIT de fase + período.
 
 Deteta o sistema estelar actual pelo Journal do Elite Dangerous e usa
 apenas as constantes orbitais e observações desse sistema — nunca mistura
 registos/constantes de sistemas diferentes (ex.: Fujin vs Kamitra).
 
+As OBSERVAÇÕES vêm da BD Postgres partilhada na LAN (a mesma que o PC
+Linux usa — ver .env.example); se a BD estiver inacessível, cai para as
+observações locais do los_calibracao.json como plano B. As CONSTANTES
+orbitais vivem no JSON, mas o periodo_carrier_s do JSON passa a ser apenas
+o PALPITE INICIAL: o checker ajusta simultaneamente a FASE e o PERÍODO do
+carrier contra as observações a cada corrida.
+
+Porquê ajustar o período: uma medição manual do período do carrier com um
+erro de 1% desloca a previsão ~17 min por semana. Com dezenas de
+observações espalhadas por dias, a regressão encontra o período que
+realmente encaixa os dados — e, como muitos períodos vizinhos encaixam
+igualmente bem (um 'planalto'), escolhe o CENTRO desse planalto, que é
+estável de corrida para corrida (ao contrário do argmax, que salta pelas
+bordas). À medida que a BD cresce, o planalto estreita e o ajuste afina-se
+sozinho.
+
 Fluxo:
   1. Deteta o sistema actual (StarSystem no Journal mais recente)
-  2. Lê sistemas[<sistema>] do los_calibracao.json
-  3. Se não houver constantes completas para esse sistema, salta a
-     verificação (não usa as constantes de outro sistema por engano)
-  4. Ajusta fase_carrier por regressão a partir de observacoes[]
-  5. Simula a partir de agora e devolve segundos de espera
+  2. Lê sistemas[<sistema>] do los_calibracao.json (constantes/palpite)
+  3. Se não houver constantes completas, salta a verificação
+  4. Vai buscar as observações do sistema à BD partilhada (fallback: JSON)
+  5. Ajusta fase + período por varrimento; usa o período central do planalto
+  6. Simula a partir de agora e devolve segundos de espera
 
 API:
     from los_checker import calcular_espera_los
@@ -28,6 +44,18 @@ from datetime import datetime, timedelta, timezone
 
 PASSO_SIMULACAO        = 10     # segundos
 LIMITE_SIMULACAO_HORAS = 24
+
+# --- Auto-fit do período do carrier ---
+FIT_VARIACAO   = 0.12   # varre o período do carrier em ±12% à volta do palpite do JSON
+FIT_PASSO_FRAC = 0.002  # resolução do varrimento de período: 0.2%
+FIT_PASSOS_FASE = 360   # resolução de fase: 1 grau
+
+
+def _agora_utc_naive():
+    """ UTC 'naive' (sem tzinfo), como o antigo datetime.utcnow() mas sem o
+        DeprecationWarning. Mantém compatibilidade com os timestamps naive
+        das observações. """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ==========================================
@@ -75,83 +103,99 @@ def tem_los(p_est, p_car, raio_bloqueio):
 
 
 # ==========================================
-# REGRESSÃO — ajusta fase_carrier
+# AUTO-FIT: FASE + PERÍODO DO CARRIER
 # ==========================================
-def _estado_modelo(fase_est, fase_car, epoch, t_obs, semi_eixo_estacao, periodo_estacao,
-                    semi_eixo_carrier, periodo_carrier, raio_bloqueio):
-    """Devolve True se o modelo prevê visibilidade em t_obs."""
-    est = EntidadeOrbital(semi_eixo_estacao, periodo_estacao, fase_est, epoch)
-    car = EntidadeOrbital(semi_eixo_carrier, periodo_carrier, fase_car, epoch)
-    return tem_los(est.pos(t_obs), car.pos(t_obs), raio_bloqueio)
-
-
-def _score(fase_car, observacoes, epoch, semi_eixo_estacao, periodo_estacao,
-           semi_eixo_carrier, periodo_carrier, raio_bloqueio):
+def _calibrar_fase_periodo(observacoes, cfg, raio_bloqueio,
+                           var=FIT_VARIACAO, passo_frac=FIT_PASSO_FRAC,
+                           passos_fase=FIT_PASSOS_FASE):
     """
-    Conta quantas observações o modelo acerta.
-    Observações com estado 'visivel' devem ter LOS=True,
-    'oclusos' devem ter LOS=False.
+    Ajusta SIMULTANEAMENTE a fase e o período do carrier por varrimento em
+    grelha contra as observações. Devolve:
+        (epoch, fase_est=0.0, fase_car, periodo_car, score, n, (Tlo, Thi))
+    ou None se não houver observações utilizáveis.
+
+    De entre TODOS os períodos que atingem o melhor score (o 'planalto'),
+    escolhe o período CENTRAL (mediana) — mais estável de corrida para
+    corrida do que o argmax, que salta pelas bordas do planalto.
+
+    Inner loop otimizado: a posição da estação é pré-calculada uma vez (não
+    depende de período nem fase), e a rotação por fase usa a fórmula de
+    adição de ângulos (sem trigonometria dentro do laço mais interno).
     """
-    acertos = 0
-    for obs in observacoes:
+    parsed, ts = [], []
+    for o in observacoes:
+        est = o.get('estado')
+        if est not in ('visivel', 'oclusos'):
+            continue
         try:
-            t = datetime.fromisoformat(obs['timestamp_utc'])
-            estado = obs['estado']
-            if estado not in ('visivel', 'oclusos'):
-                continue
-            previsto = _estado_modelo(0.0, fase_car, epoch, t, semi_eixo_estacao, periodo_estacao,
-                                       semi_eixo_carrier, periodo_carrier, raio_bloqueio)
-            real = (estado == 'visivel')
-            if previsto == real:
-                acertos += 1
+            t = datetime.fromisoformat(o['timestamp_utc'])
         except Exception:
             continue
-    return acertos
+        parsed.append((t, est == 'visivel'))
+        ts.append(t)
+    if not parsed:
+        return None
 
+    epoch = min(ts)
+    a_est = cfg['semi_eixo_estacao_m']; T_est = cfg['periodo_estacao_s']
+    a_car = cfg['semi_eixo_carrier_m']; T0 = cfg['periodo_carrier_s']
+    raio2 = raio_bloqueio * raio_bloqueio
+    n = len(parsed)
 
-def _calibrar_fase(observacoes, semi_eixo_estacao, periodo_estacao,
-                    semi_eixo_carrier, periodo_carrier, raio_bloqueio):
-    """
-    Varre fase_carrier de 0 a 2π em passos de 1°,
-    devolve a fase que maximiza o score.
-    Usa a observação mais antiga como epoch.
-    """
-    if not observacoes:
-        return None, 0.0, math.pi
+    dt = [(t - epoch).total_seconds() for (t, _) in parsed]
+    vis = [v for (_, v) in parsed]
 
-    timestamps = []
-    for obs in observacoes:
-        try:
-            timestamps.append(datetime.fromisoformat(obs['timestamp_utc']))
-        except Exception:
-            continue
-    if not timestamps:
-        return None, 0.0, math.pi
+    # Posição da estação em cada observação (independente de T e fase)
+    w_est = 2.0 * math.pi / T_est
+    ex = [a_est * math.cos((w_est * d) % (2 * math.pi)) for d in dt]
+    ey = [a_est * math.sin((w_est * d) % (2 * math.pi)) for d in dt]
 
-    epoch = min(timestamps)
-    obs_validas = [o for o in observacoes
-                   if o.get('estado') in ('visivel', 'oclusos')]
+    # Tabela de cos/sin da fase (calculada uma vez)
+    fcos = [math.cos(2 * math.pi * i / passos_fase) for i in range(passos_fase)]
+    fsin = [math.sin(2 * math.pi * i / passos_fase) for i in range(passos_fase)]
 
-    if not obs_validas:
-        return epoch, 0.0, math.pi
+    resultados = []  # (score, T, fase)
+    n_passos = int(round(2 * var / passo_frac)) + 1
+    for k in range(n_passos):
+        frac = -var + passo_frac * k
+        T = T0 * (1.0 + frac)
+        w = 2.0 * math.pi / T
+        # Ângulo base do carrier (fase 0) em cada observação, já escalado por a_car
+        ccos = [a_car * math.cos((w * d) % (2 * math.pi)) for d in dt]
+        csin = [a_car * math.sin((w * d) % (2 * math.pi)) for d in dt]
 
-    melhor_score  = -1
-    melhor_fase   = math.pi
-    passos        = 360  # resolução de 1°
+        melhor_s, melhor_f = -1, 0.0
+        for i in range(passos_fase):
+            cf = fcos[i]; sf = fsin[i]
+            s = 0
+            for j in range(n):
+                # Carrier: roda o ângulo base pela fase (adição de ângulos)
+                cx = ccos[j] * cf - csin[j] * sf
+                cy = csin[j] * cf + ccos[j] * sf
+                # tem_los inline (raio-esfera, planeta na origem)
+                dx = cx - ex[j]; dy = cy - ey[j]
+                ddd = dx * dx + dy * dy
+                if ddd == 0.0:
+                    livre = True
+                else:
+                    tt = (-ex[j] * dx - ey[j] * dy) / ddd
+                    if tt < 0.0 or tt > 1.0:
+                        livre = True
+                    else:
+                        px = ex[j] + dx * tt; py = ey[j] + dy * tt
+                        livre = (px * px + py * py) > raio2
+                if livre == vis[j]:
+                    s += 1
+            if s > melhor_s:
+                melhor_s, melhor_f = s, 2 * math.pi * i / passos_fase
+        resultados.append((melhor_s, T, melhor_f))
 
-    for i in range(passos):
-        fase_car = (2 * math.pi * i) / passos
-        s = _score(fase_car, obs_validas, epoch, semi_eixo_estacao, periodo_estacao,
-                   semi_eixo_carrier, periodo_carrier, raio_bloqueio)
-        if s > melhor_score:
-            melhor_score = s
-            melhor_fase  = fase_car
-
-    total = len(obs_validas)
-    print(f"[LOS] Regressão: {melhor_score}/{total} observações correctas "
-          f"com fase_carrier={math.degrees(melhor_fase):.1f}°")
-
-    return epoch, 0.0, melhor_fase
+    best = max(r[0] for r in resultados)
+    planalto = sorted(((T, f) for (s, T, f) in resultados if s == best), key=lambda x: x[0])
+    Ts = [T for (T, f) in planalto]
+    T_med = Ts[len(Ts) // 2]
+    fase_med = next(f for (T, f) in planalto if T == T_med)
+    return epoch, 0.0, fase_med, T_med, best, n, (Ts[0], Ts[-1])
 
 
 # ==========================================
@@ -184,6 +228,63 @@ def obter_sistema_atual(ed_log_dir):
 
 
 # ==========================================
+# OBSERVAÇÕES — BD PARTILHADA (fallback: JSON local)
+# ==========================================
+def _obter_observacoes_db(script_dir, sistema):
+    """ Vai buscar as observações do sistema à BD Postgres partilhada
+        (configurada no .env — ver .env.example). Devolve lista de dicts
+        no MESMO formato do JSON ({'timestamp_utc': iso, 'estado': ...}),
+        com timestamps convertidos para UTC naive. Devolve None se a BD não
+        estiver acessível/configurada — o chamador cai para o JSON local. """
+    try:
+        from dotenv import load_dotenv
+        import psycopg2
+    except ImportError:
+        return None
+
+    load_dotenv(os.path.join(script_dir, ".env"))
+    host = os.environ.get("R2D2_DB_HOST")
+    password = os.environ.get("R2D2_DB_PASSWORD")
+    if not host or not password:
+        return None
+
+    try:
+        conn = psycopg2.connect(
+            host=host,
+            port=os.environ.get("R2D2_DB_PORT", "5432"),
+            dbname=os.environ.get("R2D2_DB_NAME", "ED"),
+            user=os.environ.get("R2D2_DB_USER", "r2d2"),
+            password=password,
+            connect_timeout=4,
+        )
+    except Exception as e:
+        print(f"[LOS] BD partilhada inacessível ({e.__class__.__name__}) — a usar observações locais.")
+        return None
+
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT timestamp_utc, estado, nota FROM los_observacoes "
+                "WHERE sistema = %s ORDER BY timestamp_utc;",
+                (sistema,),
+            )
+            linhas = cur.fetchall()
+    finally:
+        conn.close()
+
+    observacoes = []
+    for ts, estado, nota in linhas:
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+        observacoes.append({
+            "timestamp_utc": ts.strftime("%Y-%m-%dT%H:%M:%S"),
+            "estado": estado,
+            "nota": nota,
+        })
+    return observacoes
+
+
+# ==========================================
 # CARREGAR CALIBRAÇÃO DO SISTEMA
 # ==========================================
 def _carregar_sistema(script_dir, sistema):
@@ -209,7 +310,7 @@ def _carregar_sistema(script_dir, sistema):
     obrigatorios = ['raio_planeta_m', 'semi_eixo_estacao_m', 'semi_eixo_carrier_m',
                      'periodo_estacao_s', 'periodo_carrier_s']
     if any(cfg.get(k) is None for k in obrigatorios):
-        return None  # constantes ainda por preencher para este sistema
+        return None
 
     return cfg
 
@@ -259,21 +360,40 @@ def calcular_espera_los(ed_log_dir=None, sistema=None) -> float:
         return 0.0
 
     raio_bloqueio = cfg['raio_planeta_m'] + cfg.get('margem_atmosfera_m', 50000)
-    observacoes = cfg.get('observacoes', [])
+
+    # Observações: primeiro a BD partilhada, depois o JSON local como plano B
+    observacoes = _obter_observacoes_db(script_dir, sistema)
+    if observacoes is None:
+        observacoes = cfg.get('observacoes', [])
+        if observacoes:
+            print(f"[LOS] A usar {len(observacoes)} observações locais do JSON (BD indisponível).")
+    else:
+        print(f"[LOS] {len(observacoes)} observações de '{sistema}' carregadas da BD partilhada.")
+
+    periodo_car = cfg['periodo_carrier_s']  # palpite inicial (JSON)
 
     if observacoes:
-        epoch, fase_est, fase_car = _calibrar_fase(
-            observacoes, cfg['semi_eixo_estacao_m'], cfg['periodo_estacao_s'],
-            cfg['semi_eixo_carrier_m'], cfg['periodo_carrier_s'], raio_bloqueio)
-        if epoch is None:
-            epoch = datetime.utcnow()
+        fit = _calibrar_fase_periodo(observacoes, cfg, raio_bloqueio)
+        if fit is not None:
+            epoch, fase_est, fase_car, periodo_car, score, nobs, (Tlo, Thi) = fit
+            T0 = cfg['periodo_carrier_s']
+            desvio = (periodo_car - T0) / T0 * 100.0
+            banda = (Thi - Tlo) / T0 * 100.0
+            print(f"[LOS] Auto-fit fase+periodo: {score}/{nobs} obs correctas | "
+                  f"periodo={periodo_car:.0f}s ({desvio:+.2f}% vs constante JSON) | "
+                  f"fase={math.degrees(fase_car):.1f} graus")
+            print(f"[LOS] (planalto de periodos equivalentes: largura {banda:.2f}% -> "
+                  f"incerteza; estreita com mais observacoes)")
+        else:
+            print("[LOS] Observações ilegíveis — a assumir fase_carrier=180° (pior caso).")
+            epoch, fase_car = _agora_utc_naive(), math.pi
     else:
         print(f"[LOS] Sistema '{sistema}': sem observações ainda — a assumir fase_carrier=180° (pior caso).")
-        epoch, fase_est, fase_car = datetime.utcnow(), 0.0, math.pi
+        epoch, fase_car = _agora_utc_naive(), math.pi
 
-    agora = datetime.utcnow()
-    estacao = EntidadeOrbital(cfg['semi_eixo_estacao_m'], cfg['periodo_estacao_s'], fase_est, epoch)
-    carrier = EntidadeOrbital(cfg['semi_eixo_carrier_m'], cfg['periodo_carrier_s'], fase_car, epoch)
+    agora = _agora_utc_naive()
+    estacao = EntidadeOrbital(cfg['semi_eixo_estacao_m'], cfg['periodo_estacao_s'], 0.0, epoch)
+    carrier = EntidadeOrbital(cfg['semi_eixo_carrier_m'], periodo_car, fase_car, epoch)
 
     return _simular(estacao, carrier, agora, raio_bloqueio)
 

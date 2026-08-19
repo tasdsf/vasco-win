@@ -1,36 +1,79 @@
 #!/usr/bin/env python3
 """
-los_calibrar.py — Calibrador do LOS Checker (por sistema)
+los_calibrar.py — Calibrador do LOS Checker (grava na BD Postgres partilhada)
 
-Corre este script quando tiveres informação visual do jogo sobre
-o estado actual (oclusos ou visíveis). Deteta automaticamente o
-sistema estelar actual (via Journal) e guarda a observação dentro
-de sistemas[<sistema>]["observacoes"] em los_calibracao.json —
-nunca mistura observações de sistemas diferentes (ex.: Fujin vs
-Kamitra).
+Versão Windows ligada à mesma base de dados do PC Linux (Nobara), conforme
+temp/instrucoes_los_windows.md. Em vez de escrever no los_calibracao.json
+local, insere a observação na tabela los_observacoes da BD 'ED' na LAN —
+assim as observações das duas máquinas alimentam o mesmo modelo orbital.
+
+Cada observação é marcada com origem='win' para se distinguir das do PC
+Linux (origem='linux') e das automáticas (origem='auto-win') — é isso que
+permite usar os registos quase-simultâneos das duas máquinas como prova de
+que a oclusão é global e não por instância.
+
+Configuração: ficheiro .env na pasta do projeto (ver .env.example).
+A password NUNCA fica neste ficheiro.
+
+Dependências: pip install psycopg2-binary python-dotenv
 """
 
-import json, os
+import os
+import sys
 from datetime import datetime, timezone
 
 from los_checker import obter_sistema_atual
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    print("[CALIBRAR] Falta python-dotenv. Instala com: pip install python-dotenv")
+    sys.exit(1)
+
+try:
+    import psycopg2
+except ImportError:
+    print("[CALIBRAR] Falta psycopg2. Instala com: pip install psycopg2-binary")
+    sys.exit(1)
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ED_LOG_DIR = os.path.expanduser('~') + r"\Saved Games\Frontier Developments\Elite Dangerous"
 
-OBRIGATORIOS = ['raio_planeta_m', 'semi_eixo_estacao_m', 'semi_eixo_carrier_m',
-                'periodo_estacao_s', 'periodo_carrier_s']
+load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
+
+
+def ligar_db():
+    """ Liga à BD partilhada usando as variáveis do .env (R2D2_DB_*). """
+    host = os.environ.get("R2D2_DB_HOST")
+    password = os.environ.get("R2D2_DB_PASSWORD")
+    if not host or not password:
+        print("[CALIBRAR] .env incompleto: precisa de R2D2_DB_HOST e R2D2_DB_PASSWORD (ver .env.example).")
+        return None
+    try:
+        return psycopg2.connect(
+            host=host,
+            port=os.environ.get("R2D2_DB_PORT", "5432"),
+            dbname=os.environ.get("R2D2_DB_NAME", "ED"),
+            user=os.environ.get("R2D2_DB_USER", "r2d2"),
+            password=password,
+            connect_timeout=5,
+        )
+    except Exception as e:
+        print(f"[CALIBRAR] Falha na ligação à BD ({host}): {e}")
+        print("[CALIBRAR] Se for timeout/recusa: verificar firewall do Windows e se os dois PCs estão na mesma rede.")
+        return None
 
 
 def main():
     print("=" * 50)
-    print("  LOS CALIBRADOR — por sistema")
+    print("  LOS CALIBRADOR — grava na BD partilhada (LAN)")
     print("=" * 50)
     print()
 
     sistema = obter_sistema_atual(ED_LOG_DIR)
     if not sistema:
-        print("❌ Não foi possível detetar o sistema actual (Journal ilegível ou sem StarSystem).")
-        print("   Certifica-te que o jogo já escreveu pelo menos um evento FSDJump/Location/CarrierJump.")
+        print("[CALIBRAR] Não foi possível detetar o sistema actual (Journal ilegível ou sem StarSystem).")
+        print("           Certifica-te que o jogo já escreveu um evento FSDJump/Location/CarrierJump.")
         return
 
     print(f"Sistema detetado: {sistema}")
@@ -50,61 +93,34 @@ def main():
         print("Opção inválida.")
         return
 
+    nota = input("Nota opcional (Enter para saltar): ").strip() or None
+
     agora = datetime.now(timezone.utc)
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    caminho = os.path.join(script_dir, "los_calibracao.json")
+    conn = ligar_db()
+    if conn is None:
+        return
 
-    if os.path.exists(caminho):
-        try:
-            with open(caminho, "r") as f:
-                dados = json.load(f)
-        except Exception as e:
-            print(f"❌ Falha a ler {caminho}: {e}")
-            return
-    else:
-        dados = {"sistemas": {}}
-
-    dados.setdefault("sistemas", {})
-
-    if sistema not in dados["sistemas"]:
-        print(f"⚠️  Sistema '{sistema}' ainda não existe em los_calibracao.json — a criar entrada nova (sem constantes orbitais).")
-        dados["sistemas"][sistema] = {
-            "raio_planeta_m": None,
-            "margem_atmosfera_m": 50000,
-            "semi_eixo_estacao_m": None,
-            "semi_eixo_carrier_m": None,
-            "periodo_estacao_s": None,
-            "periodo_carrier_s": None,
-            "nota": "TODO: por preencher (raio do planeta e orbitas da estacao/carrier).",
-            "observacoes": []
-        }
-
-    cfg = dados["sistemas"][sistema]
-    cfg.setdefault("observacoes", [])
-
-    em_falta = [k for k in OBRIGATORIOS if cfg.get(k) is None]
-    if em_falta:
-        print()
-        print(f"⚠️  Atenção: o sistema '{sistema}' ainda tem constantes orbitais por preencher: {', '.join(em_falta)}.")
-        print("   A observação vai ser guardada na mesma, mas o los_checker.py vai continuar a SALTAR")
-        print("   a verificação neste sistema até essas constantes serem preenchidas manualmente.")
-
-    observacao = {
-        "timestamp_utc": agora.strftime("%Y-%m-%dT%H:%M:%S"),
-        "estado": estado,
-        "nota": f"Observado manualmente em {agora.strftime('%Y-%m-%d %H:%M:%S')} UTC"
-    }
-    cfg["observacoes"].append(observacao)
-
-    with open(caminho, "w") as f:
-        json.dump(dados, f, indent=4)
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO los_observacoes (sistema, timestamp_utc, estado, nota, origem) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id;",
+                (sistema, agora, estado, nota, "win"),
+            )
+            novo_id = cur.fetchone()[0]
+            cur.execute(
+                "SELECT COUNT(*) FROM los_observacoes WHERE sistema = %s;", (sistema,)
+            )
+            total = cur.fetchone()[0]
+    finally:
+        conn.close()
 
     print()
-    print(f"✅ Observação guardada em '{sistema}': {caminho}")
-    print(json.dumps(observacao, indent=2))
+    print(f"[CALIBRAR] Observação #{novo_id} guardada na BD: {sistema} | {estado} | {agora.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    print(f"[CALIBRAR] Total de observações de '{sistema}' na BD: {total}")
     print()
-    print("Agora corre: python3 los_checker.py")
+    print("Agora corre: python los_checker.py (em qualquer uma das máquinas)")
 
 
 if __name__ == "__main__":

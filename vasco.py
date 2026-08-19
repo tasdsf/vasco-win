@@ -10,12 +10,25 @@ import time
 import subprocess
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import keyboard
 
 # ADICIONADO: Importar a função do verificador de linha de visão
 from los_checker import calcular_espera_los
+
+# Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
+# usados para espaçamento visual no terminal).
+_print_original = print
+def print(*args, **kwargs):
+    if args and isinstance(args[0], str):
+        _texto = args[0]
+        _prefixo_nl = ""
+        while _texto.startswith("\n"):
+            _prefixo_nl += "\n"
+            _texto = _texto[1:]
+        args = (f"{_prefixo_nl}[{datetime.now().strftime('%H:%M:%S')}] {_texto}",) + args[1:]
+    _print_original(*args, **kwargs)
 
 # Set up logging
 SCRIPT_DIR = Path(__file__).parent
@@ -190,7 +203,11 @@ def main():
             if espera and espera > 0:
                 h, resto = divmod(int(espera), 3600)
                 m, s = divmod(resto, 60)
-                print(f"[LOS] Destino obscurecido pelo planeta.\n A aguardar {h}h {m}m {s}s...")
+                agora_utc_los = datetime.now(timezone.utc)
+                partida_utc = agora_utc_los + timedelta(seconds=espera)
+                partida_pt = partida_utc + timedelta(hours=1)
+                print(f"[LOS] Destino obscurecido pelo planeta.\n A aguardar {h}h {m}m {s}s... "
+                      f"Partida UTC {partida_utc.strftime('%H:%M:%S')} / PT {partida_pt.strftime('%H:%M:%S')}")
                 time.sleep(espera)
 
         # Verifica se o ciclo já terminou anteriormente para limpar o ficheiro
@@ -311,6 +328,20 @@ def main():
                     break
                 except ValueError:
                     print("Opcao invalida.")
+                except EOFError:
+                    # input() sem terminal interativo ligado (ex.: processo lancado
+                    # por outro agente/script sem stdin real) lanca EOFError, que
+                    # nao era apanhado -- o processo rebentava com traceback nao
+                    # tratado, ou ficava preso, sem se saber ao certo o que
+                    # aconteceu. Abortar em seguranca, de forma explicita e visivel
+                    # no log, e melhor do que qualquer uma dessas duas hipoteses.
+                    print("\n[VASCO] EOF ao ler a escolha (sem terminal interativo "
+                          "ligado a este processo). A abortar em seguranca em vez de "
+                          "ficar preso ou rebentar sem aviso.")
+                    logger.error(f"EOFError ao pedir escolha na etapa {current_step} "
+                                 f"({step_info['name']}) - stdin nao interativo.")
+                    abortado = True
+                    break
         
         # Finalizacao
         print_header()
