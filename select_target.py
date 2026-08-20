@@ -263,9 +263,9 @@ def marcar_destino_dinamico():
     # Define threshold baseado ao tipo de alvo
     # Carrier: medido ao vivo no scan real -> match real ~0.868, ruído das outras
     # linhas ~0.79-0.83. 0.88 era demasiado apertado e ficava acima do próprio
-    # carrier; 0.85 mantém margem segura acima do ruído mais alto visto (0.83).
-    # Station (mais ruído) 0.75.
-    threshold_matching = 0.88 if tipo_alvo == "carrier" else 0.80
+    # carrier (falhava por pouco, ~0.012); 0.85 mantém margem segura acima do
+    # ruído mais alto visto (0.83) sem ultrapassar o match real.
+    threshold_matching = 0.85 if tipo_alvo == "carrier" else 0.80
     
     print(f"\n>>> FASE: Marcar Destino ({label_alvo})...")
     pydirectinput.press('1')
@@ -273,13 +273,24 @@ def marcar_destino_dinamico():
     
     # Watchdog: Encontrar a aba NAVIGATION
     nav_found = False
-    for _ in range(8):
+    for tentativa_scan in range(8):
         # Usa hardcoded 0.85 para NAV TAB (consistente entre carriers e stations)
-        if procurar_template(templates['nav_tab'], "NAV TAB", MONITOR_PANEL, 0.85): 
+        if procurar_template(templates['nav_tab'], "NAV TAB", MONITOR_PANEL, 0.85):
             nav_found = True
             break
+        if tentativa_scan == 3:
+            # Metade das tentativas sem encontrar a aba -- o painel pode nunca
+            # ter chegado a abrir (o '1' inicial pode ter falhado por race de
+            # foco), e continuar a mandar 'q' as cegas roda a nave para a
+            # esquerda em vez de ciclar separadores (nao ha aqui outro
+            # template para confirmar "painel aberto, aba errada" como no
+            # docking.py). Reenvia '1' uma vez antes de esgotar as restantes
+            # tentativas.
+            print("[AVISO] Painel lateral pode não ter aberto -- a reenviar '1' antes de continuar a varrer.")
+            pydirectinput.press('1')
+            time.sleep(1.2)
         pydirectinput.press('q'); time.sleep(0.5)
-        
+
     if not nav_found:
         abortar_com_erro("Falha ao focar na aba de navegação do painel esquerdo após varrimento.")
     

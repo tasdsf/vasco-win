@@ -396,6 +396,48 @@ def executar_roll_recuperacao(tentativa):
     pydirectinput.keyUp(TECLA_ROLL)
     time.sleep(2.0)  # estabilizar antes da proxima leitura
 
+def executar_passo_alinhamento(sct, area_bussola, cx_neutro, cy_neutro):
+    """ Executa um UNICO frame do pipeline de alinhamento (le bussola+HUD e
+    aplica no maximo uma manobra corretiva). Devolve um dict com a leitura
+    bruta e 'alinhado_frame' (True só quando o alvo do HUD está centrado
+    nesse frame). Decisões de estabilidade, rolls de recuperação e timeouts
+    ficam a cargo de quem chama — o loop principal abaixo usa 3s de
+    estabilidade + rolls de recuperação; o plano_fuga.py usa uma leitura
+    única, sem essas políticas. """
+    img_bussola = cv2.cvtColor(np.array(sct.grab(area_bussola)), cv2.COLOR_BGRA2BGR)
+    cmd_bussola, coords_bola, mask_hsv, dist_x, dist_y = localizar_bola(img_bussola, cx_neutro, cy_neutro)
+
+    encontrou_hud, dx_hud, dy_hud, img_hud, max_val_hud, nome_tpl_hud = localizar_alvo_hud(sct)
+
+    alvo_nas_costas = (cmd_bussola == "ALVO_ATRAS")
+
+    resultado = {
+        "img_bussola": img_bussola, "mask_hsv": mask_hsv, "coords_bola": coords_bola,
+        "cmd_bussola": cmd_bussola, "dist_x": dist_x, "dist_y": dist_y,
+        "encontrou_hud": encontrou_hud, "dx_hud": dx_hud, "dy_hud": dy_hud,
+        "img_hud": img_hud, "max_val_hud": max_val_hud, "nome_tpl_hud": nome_tpl_hud,
+        "alvo_nas_costas": alvo_nas_costas,
+        "alinhado_frame": False, "comando_display": "",
+    }
+
+    if encontrou_hud and not alvo_nas_costas:
+        if abs(dx_hud) <= DEAD_ZONE_HUD and abs(dy_hud) <= DEAD_ZONE_HUD:
+            resultado["comando_display"] = "ALVO BLOQUEADO NO HUD!"
+            resultado["alinhado_frame"] = True
+            largar_todas_as_teclas()
+        else:
+            resultado["comando_display"] = f"MICRO-AJUSTE HUD (DX:{dx_hud} DY:{dy_hud})"
+            aplicar_manobra_hud(dx_hud, dy_hud)
+    else:
+        if not coords_bola:
+            resultado["comando_display"] = "MACRO: NÃO_DETETADO"
+            largar_todas_as_teclas()
+        else:
+            resultado["comando_display"] = f"MACRO: {cmd_bussola}"
+            aplicar_manobra_bussola(cmd_bussola, dist_x, dist_y)
+
+    return resultado
+
 # ==========================================
 # 5. EXECUÇÃO PRINCIPAL
 # ==========================================
@@ -442,40 +484,42 @@ if __name__ == "__main__":
                 if time.time() - tempo_inicio_manobra > LIMITE_MANOBRA:
                     abortar_com_erro(f"Bloqueio de timeout. Manobra demorou mais de {LIMITE_MANOBRA}s.")
 
-                img_bussola = cv2.cvtColor(np.array(sct.grab(area_bussola)), cv2.COLOR_BGRA2BGR)
-                cmd_bussola, coords_bola, mask_hsv, dist_x, dist_y = localizar_bola(img_bussola, CX_NEUTRO, CY_NEUTRO)
-                
-                encontrou_hud, dx_hud, dy_hud, img_hud, max_val_hud, nome_tpl_hud = localizar_alvo_hud(sct)
-                
-                alvo_nas_costas = (cmd_bussola == "ALVO_ATRAS")
-                comando_display = ""
-                
-                if encontrou_hud and not alvo_nas_costas:
+                passo = executar_passo_alinhamento(sct, area_bussola, CX_NEUTRO, CY_NEUTRO)
+                img_bussola = passo["img_bussola"]
+                coords_bola = passo["coords_bola"]
+                cmd_bussola = passo["cmd_bussola"]
+                encontrou_hud = passo["encontrou_hud"]
+                dx_hud, dy_hud = passo["dx_hud"], passo["dy_hud"]
+                img_hud = passo["img_hud"]
+                max_val_hud, nome_tpl_hud = passo["max_val_hud"], passo["nome_tpl_hud"]
+                alvo_nas_costas = passo["alvo_nas_costas"]
+                comando_display = passo["comando_display"]
+
+                if passo["alinhado_frame"]:
                     tempo_cego = None
                     tempo_sem_hud = None
                     rolls_recuperacao = 0  # leitura recuperada; futuras perdas tem direito a novos rolls
-                    if abs(dx_hud) <= DEAD_ZONE_HUD and abs(dy_hud) <= DEAD_ZONE_HUD:
-                        comando_display = "ALVO BLOQUEADO NO HUD!"
-                        largar_todas_as_teclas()
-                        
-                        if tempo_inicio_centrado is None:
-                            tempo_inicio_centrado = time.time()
-                            
-                        if time.time() - tempo_inicio_centrado >= TEMPO_ESTABILIDADE_FINAL:
-                            print("\n[SUCESSO] Vetor trancado. Coordenadas estáveis.")
-                            tocar_alarme_sucesso()
-                            falar("Alignment successful. Vector locked.")
-                            sys.exit(0)
-                    else:
-                        tempo_inicio_centrado = None
-                        comando_display = f"MICRO-AJUSTE HUD (DX:{dx_hud} DY:{dy_hud})"
-                        aplicar_manobra_hud(dx_hud, dy_hud)
-                        
+
+                    if tempo_inicio_centrado is None:
+                        tempo_inicio_centrado = time.time()
+
+                    if time.time() - tempo_inicio_centrado >= TEMPO_ESTABILIDADE_FINAL:
+                        print("\n[SUCESSO] Vetor trancado. Coordenadas estáveis.")
+                        tocar_alarme_sucesso()
+                        falar("Alignment successful. Vector locked.")
+                        sys.exit(0)
+                elif encontrou_hud and not alvo_nas_costas:
+                    # HUD encontrado mas ainda nao centrado (micro-ajuste ja aplicado
+                    # dentro de executar_passo_alinhamento) - mesma limpeza de estado
+                    # de recuperacao que o caso alinhado, so sem o timer de estabilidade.
+                    tempo_cego = None
+                    tempo_sem_hud = None
+                    rolls_recuperacao = 0
+                    tempo_inicio_centrado = None
                 else:
                     tempo_inicio_centrado = None
-                    
+
                     if not coords_bola:
-                        comando_display = "MACRO: NÃO_DETETADO"
                         if tempo_cego is None: tempo_cego = time.time()
                         elif (time.time() - tempo_cego > TEMPO_CEGO_ANTES_ROLL
                               and rolls_recuperacao < MAX_ROLLS_RECUPERACAO):
@@ -486,7 +530,6 @@ if __name__ == "__main__":
                             tempo_cego = None  # reinicia a janela de observacao apos o roll
                         elif time.time() - tempo_cego > LIMITE_CEGO:
                             abortar_com_erro(f"Perda prolongada de telemetria visual da bússola ({rolls_recuperacao} rolls de recuperação sem efeito).")
-                        largar_todas_as_teclas()
                     else:
                         tempo_cego = None
                         if cmd_bussola == "ALINHADO_MACRO" and not encontrou_hud:
@@ -500,8 +543,6 @@ if __name__ == "__main__":
                                 tempo_sem_hud = None
                         else:
                             tempo_sem_hud = None
-                        comando_display = f"MACRO: {cmd_bussola}"
-                        aplicar_manobra_bussola(cmd_bussola, dist_x, dist_y)
 
                 if VISUAL_DEBUG:
                     img_hud_bussola = img_bussola.copy()

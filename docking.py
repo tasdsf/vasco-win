@@ -119,6 +119,11 @@ LOG_DIR = os.path.expanduser('~') + r"\Saved Games\Frontier Developments\Elite D
 pasta_imagens = os.path.join(diretorio_atual, 'images')
 templates_nomes = {
     'contacts_tab': 'CONTACTS.png',
+    # Reaproveitado de select_target.py/supercruise_assist.py (mesma imagem,
+    # ja calibrada la para threshold 0.80-0.85) -- aqui serve so para
+    # confirmar que o painel lateral esta mesmo aberto nalgum separador,
+    # antes de arriscar ciclar com 'e' (ver solicitar_docking).
+    'nav_tab': 'NAVIGATION_SELECTED.png',
     'docking_off': 'REQUEST_DOCKING_OFF.png',
     'docking_on': 'REQUEST_DOCKING_ON.png',
     'repair': 'repair.png'
@@ -255,8 +260,26 @@ def solicitar_docking():
                 print("[LOG] Aba Contacts confirmada!")
                 aba_encontrada = True
                 break
-            pydirectinput.press('e')
-            time.sleep(0.6)
+            if procurar_template(templates['nav_tab'], "NAV TAB (painel aberto, ainda noutro separador)", 0.80):
+                # Sabemos exatamente em que separador estamos (Navigation) --
+                # a ordem dos separadores e fixa, por isso 'e'+'e' a partir
+                # daqui chega sempre ao Contacts, com mais certeza do que
+                # ciclar 'e' um de cada vez confiando so no template (que
+                # pode falhar por ruido visual).
+                print("[LOG] Painel na aba Navigation -- a avançar 2x (e+e) diretamente para Contacts.")
+                pydirectinput.press('e')
+                time.sleep(0.5)
+                pydirectinput.press('e')
+                time.sleep(0.5)
+            else:
+                # Nem Contacts nem Nav Tab visiveis -- o painel provavelmente
+                # nao chegou a abrir (o '1' pode ter falhado por race de foco).
+                # NAO manda 'e' as cegas aqui -- fora do painel essa tecla e o
+                # roll da nave (ver TECLA_ROLL em olho.py), e foi isso que
+                # esteve a rodar a nave sem querer. Reenvia '1' em vez disso.
+                print("[AVISO] Painel lateral não parece estar aberto -- a reenviar '1' em vez de ciclar 'e' às cegas.")
+                pydirectinput.press('1')
+                time.sleep(1.2)
         
         if not aba_encontrada:
             msg = "[ERRO] Não detetei a aba Contacts. Tentando reiniciar ciclo..."

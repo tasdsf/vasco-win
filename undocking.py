@@ -188,7 +188,28 @@ def executar_auto_launch():
         m1, _ = procurar_template(templates['repair'], "ESTABILIZACAO", MONITOR_MENU, 0.70)
         if m1: break
         time.sleep(0.3)
-    
+
+    time.sleep(0.5)
+
+    # Passo 0.5: Reabastecimento (combustível + heatsinks) antes de descolar.
+    # Sequência dada explicitamente: 3x 'w' + space leva o cursor ao botão do
+    # combustível e ativa-o (enche o depósito); 2x 'd' + space ilumina o
+    # botão das munições e ativa-o (enche o reservatório de heatsinks ao
+    # máximo). Sem template calibrado para validar visualmente estes dois
+    # botões (ao contrário do Auto-Launch, que já tem o seu) -- sequência às
+    # cegas, tal como descrita.
+    print("\nA reabastecer combustível: 3x 'w' + space...")
+    for _ in range(3):
+        pydirectinput.press('w')
+        time.sleep(0.2)
+    pydirectinput.press('space')
+    time.sleep(0.5)
+
+    print("A repor heatsinks: 2x 'd' + space...")
+    for _ in range(2):
+        pydirectinput.press('d')
+        time.sleep(0.2)
+    pydirectinput.press('space')
     time.sleep(0.5)
 
     # Passo 1: Subida Mecânica

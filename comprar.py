@@ -349,7 +349,7 @@ def executar_ciclo_completo():
                     continue
 
                 elif resultado == "NAO_ENCONTRADO":
-                    print("\n[REPETIR] Item esgotado. Saindo e aguardando 2 minutos...")
+                    print("\n[REPETIR] Item esgotado. Saindo e aguardando 1 minuto...")
                     # Clica no Exit que já está selecionado
                     pydirectinput.press('space')
                     time.sleep(1.5)
@@ -360,7 +360,7 @@ def executar_ciclo_completo():
                         pydirectinput.press('backspace')
                         time.sleep(0.8)
 
-                    time.sleep(120) # 2 Minutos
+                    time.sleep(60) # 1 Minuto
                     continue
 
 if __name__ == "__main__":
