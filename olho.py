@@ -399,11 +399,12 @@ def executar_roll_recuperacao(tentativa):
 def executar_passo_alinhamento(sct, area_bussola, cx_neutro, cy_neutro):
     """ Executa um UNICO frame do pipeline de alinhamento (le bussola+HUD e
     aplica no maximo uma manobra corretiva). Devolve um dict com a leitura
-    bruta e 'alinhado_frame' (True só quando o alvo do HUD está centrado
-    nesse frame). Decisões de estabilidade, rolls de recuperação e timeouts
-    ficam a cargo de quem chama — o loop principal abaixo usa 3s de
-    estabilidade + rolls de recuperação; o plano_fuga.py usa uma leitura
-    única, sem essas políticas. """
+    bruta e 'alinhado_frame' -- True quando o alvo do HUD está centrado
+    nesse frame, OU quando a bússola (macro) já está perto do centro
+    (ALINHADO_MACRO), sem esperar pelo travamento fino do HUD. Decisões de
+    estabilidade, rolls de recuperação e timeouts ficam a cargo de quem
+    chama — o loop principal abaixo usa 3s de estabilidade + rolls de
+    recuperação; o plano_fuga.py usa uma leitura única, sem essas políticas. """
     img_bussola = cv2.cvtColor(np.array(sct.grab(area_bussola)), cv2.COLOR_BGRA2BGR)
     cmd_bussola, coords_bola, mask_hsv, dist_x, dist_y = localizar_bola(img_bussola, cx_neutro, cy_neutro)
 
@@ -428,6 +429,17 @@ def executar_passo_alinhamento(sct, area_bussola, cx_neutro, cy_neutro):
         else:
             resultado["comando_display"] = f"MICRO-AJUSTE HUD (DX:{dx_hud} DY:{dy_hud})"
             aplicar_manobra_hud(dx_hud, dy_hud)
+    elif cmd_bussola == "ALINHADO_MACRO":
+        # Alinhado macro (bola perto do centro) passa a contar como alinhado
+        # por si só -- já não fica à espera do HUD travar o alvo com
+        # precisão antes de avançar (era o comportamento antigo, via
+        # aplicar_manobra_bussola/"espera pelo HUD"). Nota: a recuperação por
+        # roll para "bola centrada mas sem HUD visível" no loop standalone
+        # abaixo fica agora inatingível a partir daqui -- desligada de
+        # propósito, não é um esquecimento.
+        resultado["comando_display"] = "MACRO: ALINHADO_MACRO (aceite como alinhado, sem esperar pelo HUD)"
+        resultado["alinhado_frame"] = True
+        largar_todas_as_teclas()
     else:
         if not coords_bola:
             resultado["comando_display"] = "MACRO: NÃO_DETETADO"
