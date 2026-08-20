@@ -94,7 +94,7 @@ def focar_jogo_seguro():
 # ==========================================
 # 1. SETUP DE GEOMETRIA E TEMPLATES
 # ==========================================
-MONITOR_MENU = {"top": 1100, "left": 1100, "width": 400, "height": 400}
+MONITOR_MENU = {"top": 1100, "left": 1080, "width": 420, "height": 400}
 MONITOR_CORNER = {"top": 100, "left": 1900, "width": 370, "height": 280}
 
 pasta_imagens = os.path.join(diretorio_atual, 'images')
@@ -103,7 +103,9 @@ templates_nomes = {
     'repair': 'repair.png',
     'autolaunch': 'AUTO_LAUNCH.png',
     'noselection': 'NO_SELECTION.png',
-    'auto_complete': 'AUTO_LAUNCH_COMPLETE.png'
+    'auto_complete': 'AUTO_LAUNCH_COMPLETE.png',
+    'need_repair': 'NEED-REPAIR.png',
+    'no_ammo': 'no_ammo.png'
 }
 
 templates = {}
@@ -191,13 +193,30 @@ def executar_auto_launch():
 
     time.sleep(0.5)
 
-    # Passo 0.5: Reabastecimento (combustível + heatsinks) antes de descolar.
-    # Sequência dada explicitamente: 3x 'w' + space leva o cursor ao botão do
-    # combustível e ativa-o (enche o depósito); 2x 'd' + space ilumina o
-    # botão das munições e ativa-o (enche o reservatório de heatsinks ao
-    # máximo). Sem template calibrado para validar visualmente estes dois
-    # botões (ao contrário do Auto-Launch, que já tem o seu) -- sequência às
-    # cegas, tal como descrita.
+    # Passo 0.5: Reabastecimento (combustível + reparação/munições) antes de
+    # descolar. A gota (fuel) está sempre ativa ao aterrar (chegar gasta
+    # combustível, falta sempre alguma coisa) -- corre sempre às cegas, sem
+    # template calibrado para a validar visualmente.
+    #
+    # CRÍTICO: valida NEED-REPAIR e no_ammo ANTES de premir qualquer tecla,
+    # não depois do fuel -- NEED-REPAIR.png é o par gota+chave AMBOS ativos.
+    # Assim que se clica no fuel a gota muda de estado visualmente, e checar
+    # depois disso faz o match falhar mesmo com a chave ainda ativa (ver
+    # diagnóstico desta conversa: "a gota é validada e o need-repair falha").
+    # need_repair a 0.70 (match real de 0.96 num print de jogo, pré-fuel) --
+    # MATCH = precisa reparar.
+    #
+    # no_ammo.png é o INVERSO: captura o ícone de munições no estado
+    # INATIVO (não precisa reabastecer) -- por isso MATCH = não repor, e só
+    # se repõe munições quando este template NÃO dá match. Threshold 0.65 --
+    # match real de 0.68 num print onde o ícone do lápis (indicador de
+    # heatsinks, incluído no mesmo recorte) também estava inativo, o que
+    # baixa o score; 0.65 dá margem para esse estado sem deixar de exigir
+    # um match real.
+    print("\nA validar estado do painel (NEED-REPAIR / no_ammo) antes de qualquer tecla...")
+    need_repair, _ = procurar_template(templates['need_repair'], "NEED_REPAIR", MONITOR_MENU, 0.70)
+    ammo_inativo, _ = procurar_template(templates['no_ammo'], "NO_AMMO (inativo = não precisa)", MONITOR_MENU, 0.65)
+
     print("\nA reabastecer combustível: 3x 'w' + space...")
     for _ in range(3):
         pydirectinput.press('w')
@@ -205,12 +224,34 @@ def executar_auto_launch():
     pydirectinput.press('space')
     time.sleep(0.5)
 
-    print("A repor heatsinks: 2x 'd' + space...")
-    for _ in range(2):
+    if need_repair:
+        print("A reparar (NEED-REPAIR detetado antes do fuel): 'd' + space...")
         pydirectinput.press('d')
         time.sleep(0.2)
-    pydirectinput.press('space')
-    time.sleep(0.5)
+        pydirectinput.press('space')
+        time.sleep(0.5)
+
+        if not ammo_inativo:
+            print("A repor munições (detetado antes do fuel, após reparação): 'd' + space...")
+            pydirectinput.press('d')
+            time.sleep(0.2)
+            pydirectinput.press('space')
+            time.sleep(0.5)
+        else:
+            # Sem munições a repor -- não pode ficar a terminar no botão
+            # Repair (fica selecionado/iluminado e o NO_SELECTION deixa de
+            # validar mais à frente). 'd' extra só para sair dele.
+            print("Sem reposição de munições -- 'd' extra para sair do botão Repair...")
+            pydirectinput.press('d')
+            time.sleep(0.2)
+    else:
+        if not ammo_inativo:
+            print("A repor munições (detetado antes do fuel, sem reparação): 2x 'd' + space...")
+            for _ in range(2):
+                pydirectinput.press('d')
+                time.sleep(0.2)
+            pydirectinput.press('space')
+            time.sleep(0.5)
 
     # Passo 1: Subida Mecânica
     print("\nA enviar comandos mecânicos: 3x 'w' + 1x 'space'...")

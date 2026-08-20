@@ -135,6 +135,10 @@ IMPULSO_BUSSOLA_GIGANTE = 8 * IMPULSO_BUSSOLA  # ALVO_ATRAS precisa de guinada g
 COOLDOWN_GIGANTE = 3.5  # tempo extra pós-guinada gigante para a nave estabilizar antes da próxima leitura
 TOLERANCIA_BOLA = 3.5
 
+# Motores laterais (A/D) sao mais fracos que os de pitch (W/S) -- ficam
+# premidos MULTIPLICADOR_LATERAL vezes mais tempo para o mesmo impulso.
+MULTIPLICADOR_LATERAL = 2
+
 # Mantidos os teus valores de calibração fina atualizados:
 MONITOR_HUD = {"top": 500, "left": 1050, "width": 400, "height": 500}
 DEAD_ZONE_HUD = 15
@@ -350,21 +354,29 @@ def aplicar_manobra_bussola(comando, dist_x, dist_y):
     
     for t in ["w", "s", "a", "d"]:
         if t not in teclas_necessarias: pydirectinput.keyUp(t)
-        
+
     dist_max = max(dist_x, dist_y)
-    
+    teclas_ws = [t for t in teclas_necessarias if t in ("w", "s")]
+    teclas_ad = [t for t in teclas_necessarias if t in ("a", "d")]
+
     if dist_max > RAIO_AJUSTE_FINO:
-        print(f"[INFO] 4 * IMPULSO_BUSSOLA: {teclas_necessarias}") 
+        print(f"[INFO] 4 * IMPULSO_BUSSOLA: {teclas_necessarias}")
         for t in teclas_necessarias: pydirectinput.keyDown(t)
         time.sleep(4 * IMPULSO_BUSSOLA)
-        pydirectinput.keyUp(t)
+        for t in teclas_ws: pydirectinput.keyUp(t)
+        if teclas_ad:
+            time.sleep((MULTIPLICADOR_LATERAL - 1) * 4 * IMPULSO_BUSSOLA)
+            for t in teclas_ad: pydirectinput.keyUp(t)
         time.sleep(2.0)
     else:
-        print(f"[INFO] IMPULSO_BUSSOLA: {teclas_necessarias}") 
+        print(f"[INFO] IMPULSO_BUSSOLA: {teclas_necessarias}")
         for t in teclas_necessarias: pydirectinput.keyDown(t)
         time.sleep(IMPULSO_BUSSOLA)
-        for t in teclas_necessarias: pydirectinput.keyUp(t)
-        
+        for t in teclas_ws: pydirectinput.keyUp(t)
+        if teclas_ad:
+            time.sleep((MULTIPLICADOR_LATERAL - 1) * IMPULSO_BUSSOLA)
+            for t in teclas_ad: pydirectinput.keyUp(t)
+
     largar_todas_as_teclas()
     time.sleep(3.0)
 
@@ -380,9 +392,14 @@ def aplicar_manobra_hud(dx, dy):
 
     if teclas:
         print(f"[INFO] IMPULSO_HUD: {teclas}") # CORRIGIDO: Agora lista os inputs corretos
+        teclas_ws = [t for t in teclas if t in ("w", "s")]
+        teclas_ad = [t for t in teclas if t in ("a", "d")]
         for t in teclas: pydirectinput.keyDown(t)
-        time.sleep(IMPULSO_HUD) 
-        for t in teclas: pydirectinput.keyUp(t)
+        time.sleep(IMPULSO_HUD)
+        for t in teclas_ws: pydirectinput.keyUp(t)
+        if teclas_ad:
+            time.sleep((MULTIPLICADOR_LATERAL - 1) * IMPULSO_HUD)
+            for t in teclas_ad: pydirectinput.keyUp(t)
         time.sleep(2.0) # Mantidos os 2 segundos estruturais de estabilização
 
 def executar_roll_recuperacao(tentativa):

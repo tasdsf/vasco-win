@@ -39,10 +39,30 @@ logging.basicConfig(
 # [SUPERCRUISE], nível INFO) que fica ativa.
 import plano_fuga
 import olho
+from leg_state import leg_esta_limpa
+
+def _capturar_screenshot_erro():
+    """ Grava o ecrã inteiro do jogo em logs/erro_<timestamp>.png -- dá
+    contexto visual ao anexar-se automaticamente à notificação do Discord
+    (ver discord_notify.notificar_erro_discord). Best-effort: uma falha
+    aqui não pode impedir o abort em curso. """
+    try:
+        caminho = os.path.join(LOGS_DIR, f"erro_{int(time.time())}.png")
+        with mss.mss() as sct:
+            try:
+                monitor_jogo = sct.monitors[1]
+            except Exception:
+                monitor_jogo = sct.monitors[0]
+            img_bgra = np.array(sct.grab(monitor_jogo))
+            cv2.imwrite(caminho, cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR))
+        print(f"[SCREENSHOT] Erro gravado em {caminho}")
+    except Exception as e:
+        print(f"[AVISO] Falha ao gravar screenshot de erro: {e}")
 
 def abortar_com_erro(mensagem):
     print(f"\n[FATAL] {mensagem}")
     logging.error(mensagem)
+    _capturar_screenshot_erro()
     sys.exit(1)
 
 # Voz
@@ -116,6 +136,10 @@ TEMPLATES_NOMES = {
     'unlocked': 'UNLOCKED_DESTINATION.png',
     'assist_active': 'SUPERCRUISE_ASSIST_ACTIVE.png',
     'align_warning': 'SUPERCRUISE_ASSIST_INACTIVE.png',
+    # 'Dois triangulos azuis' que aparecem um pouco acima do aviso de
+    # desalinhamento quando o alvo fica travado -- usado em
+    # aguardar_assist_no_hud() para saber quando parar de corrigir.
+    'assist_locked': 'SUPERCRUISE_ASSIST_LOCKED.png',
     'throttle_up': 'THROTTLE_UP.png',
     # Reaproveitados de select_target.py (mesmas imagens, mesmo MONITOR_PANEL)
     # -- usados em engatar_assistencia_menu() para confirmar o alvo certo.
@@ -204,6 +228,18 @@ def ler_cargo_telemetria(debug=False):
 # houver carga a bordo e o destino do salto for esta, a venda no carrier
 # falhou nalgures e a nave esta prestes a regressar sem vender.
 ESTACAO_ORIGEM = "Futen Spaceport"
+
+def _registar_los_se_perna_limpa():
+    """ Só regista a observação automática de LOS se a perna atual
+    (undocking->supercruise, ver leg_state.py) não teve nenhum erro/retry
+    até agora -- um salto que só "passou" porque uma tentativa anterior
+    falhou (ou teve ajuda manual) não é uma medição independente, e
+    contaminaria o ajuste de fase/período em los_checker.py. """
+    if leg_esta_limpa():
+        registar_los_visivel_auto()
+    else:
+        print("[LOS-AUTO] Perna com erro/retry -- observação não registada "
+              "(evita contaminar o ajuste com um salto que pode ter tido ajuda).")
 
 def confirmar_chegada_por_journal():
     """ Confirma se a queda de Supercruise mais recente foi mesmo uma chegada
@@ -396,7 +432,7 @@ def iniciar_salto_seguro():
     # 1. Confirmou que está a carregar
     if salto_confirmado == "carga":
         print("[OK] Motor FSD em carga confirmada pela telemetria.")
-        registar_los_visivel_auto()
+        _registar_los_se_perna_limpa()
         # Espera o salto acontecer
         pydirectinput.press('x')
         time.sleep(4.5)
@@ -405,7 +441,7 @@ def iniciar_salto_seguro():
     # 1b. Já não está a carregar porque o salto já teve sucesso entretanto
     if salto_confirmado == "supercruise":
         print("[OK] Já em Supercruise (a carga completou antes da leitura de telemetria).")
-        registar_los_visivel_auto()
+        _registar_los_se_perna_limpa()
         pydirectinput.press('x')
         return True
 
@@ -468,8 +504,23 @@ def fechar_painel_se_aberto():
     if procurar_template(templates['nav_tab'], "NAV TAB (verificação antes de fechar)", MONITOR_PANEL, 0.80, debug=True):
         pydirectinput.press('1')
 
+def assist_ja_ativo():
+    """ Confirma no HUD (painel fechado) se o Supercruise Assist já está
+    ligado -- 'assist_active' (ligado e a apontar para o alvo) ou
+    'align_warning'/SUPERCRUISE_ASSIST_INACTIVE.png (ligado mas ainda
+    desalinhado do alvo -- apesar do nome do ficheiro, esta imagem só
+    aparece com o assist LIGADO, não desligado). Só a ausência de ambas
+    significa que o assist está mesmo desligado. """
+    return (procurar_template(templates['assist_active'], "ASSIST ACTIVE (pré-toggle)", MONITOR_CENTER, 0.75, debug=True)
+            or procurar_template(templates['align_warning'], "ASSIST LIGADO MAS DESALINHADO (pré-toggle)", MONITOR_CENTER, 0.82, debug=True))
+
 def engatar_assistencia_menu():
     print("\n>>> FASE 1: Navegação no Painel Esquerdo...")
+
+    # Confirma o estado do assist ANTES de abrir o painel -- os templates só
+    # são visíveis no HUD com o painel fechado. Usado no passo 3 para decidir
+    # se o D+Space (toggle) deve ser enviado ou saltado.
+    assist_estava_ativo = assist_ja_ativo()
 
     # Reduzir velocidade antes de mexer nos menus
     pydirectinput.press('x')
@@ -551,20 +602,46 @@ def engatar_assistencia_menu():
         logging.error(f"engatar_assistencia_menu: painel de confirmação do alvo '{nome_alvo}' não apareceu após 3 tentativas.")
         abortar_com_erro(f"Falha crítica: painel de confirmação do alvo '{nome_alvo}' não apareceu após 3 tentativas.")
 
-    # 3. Selecionar o Supercruise Assist (D -> Space)
-    print(">>> Movendo para o botão Supercruise Assist (D)...")
-    pydirectinput.press('d')
-    time.sleep(0.5)
+    # 3. Selecionar o Supercruise Assist (D -> Space) -- só ativa se ainda
+    # não estava ligado antes de abrir o painel (assist_estava_ativo). D+Space
+    # é um toggle: enviá-lo com o assist já ligado desliga-o em vez de o
+    # ligar -- foi isto que desligou o assist com o alvo já trancado num
+    # caso real (ver diagnóstico desta conversa).
+    if assist_estava_ativo:
+        print("[OK] Supercruise Assist já estava ligado antes de abrir o painel -- a saltar D+Space.")
+    else:
+        print(">>> Movendo para o botão Supercruise Assist (D)...")
+        pydirectinput.press('d')
+        time.sleep(0.5)
 
-    print(">>> Ativando Assistência (Space)...")
-    pydirectinput.press('space')
-    time.sleep(1.0)
+        print(">>> Ativando Assistência (Space)...")
+        pydirectinput.press('space')
+        time.sleep(1.0)
 
-    pydirectinput.press('1') # Fecha painel
-    logging.info(f"engatar_assistencia_menu: sequência concluída (NAV confirmado, alvo={nome_alvo or 'N/D'} confirmado, D+Space enviados).")
+    # Fecha o painel -- Backspace (UI Back) em vez de '1', que também é um
+    # toggle e podia reabrir o painel em vez de o fechar se o estado do menu
+    # não fosse o esperado. Confirma pelo NAV TAB que o painel fechou mesmo
+    # antes de prosseguir -- foi a falta desta confirmação que deixou o
+    # painel preso aberto a receber as teclas de direção do alinhamento
+    # (olho.py) em vez do jogo, num caso real (ver diagnóstico desta
+    # conversa).
+    painel_fechado = False
+    for _ in range(3):
+        pydirectinput.press('backspace')
+        time.sleep(0.5)
+        if not procurar_template(templates['nav_tab'], "NAV TAB (a confirmar fecho do painel)", MONITOR_PANEL, 0.80, debug=True):
+            painel_fechado = True
+            break
+
+    if not painel_fechado:
+        fechar_painel_se_aberto()
+        logging.error("engatar_assistencia_menu: painel não fechou após 3 tentativas de Backspace.")
+        abortar_com_erro("Falha crítica: painel não fechou após ativar o Supercruise Assist -- a parar antes de mandar teclas de alinhamento para um menu ainda aberto.")
+
+    logging.info(f"engatar_assistencia_menu: sequência concluída (NAV confirmado, alvo={nome_alvo or 'N/D'} confirmado, D+Space {'saltado (assist já ligado)' if assist_estava_ativo else 'enviado'}).")
     print(">>> Painel fechado. Voltando ao Cockpit.")
 
-def engatar_assist_e_alinhar(timeout=20):
+def engatar_assist_e_alinhar(timeout=30):
     """ Sequência padrão ao entrar em Supercruise -- usada tanto no arranque
     normal (executar) como depois de plano_fuga.executar_fuga() confirmar
     reentrada: reengata o Supercruise Assist do jogo (engatar_assistencia_menu,
@@ -603,37 +680,100 @@ def engatar_assist_e_alinhar(timeout=20):
 # 5. FASE 2: VIAGEM E CHEGADA
 # ==========================================
 def aguardar_assist_no_hud():
-    """ Espera o icone ASSIST_ACTIVE aparecer de forma estavel no HUD (3
-    deteccoes seguidas). Usado ao ligar o assist pela primeira vez e outra vez
-    depois de um plano de fuga bem sucedido reengatar o assist a meio da
-    viagem (ver monitorar_viagem).
+    """ Em vez de só esperar passivamente o icone ASSIST_ACTIVE estabilizar,
+    continua a corrigir o alinhamento (via olho.py) enquanto o HUD mostrar o
+    aviso de desalinhamento (templates['align_warning']) -- o Assist só
+    estabiliza sozinho depois de já estar minimamente apontado ao alvo.
 
-    Devolve True quando o icone confirma normalmente, ou a string
+    O sinal de "alvo travado" é templates['assist_locked'] (as 'duas
+    triangulos azuis' que aparecem um pouco acima de onde estava o aviso de
+    desalinhamento) -- assim que aparece, PARA de corrigir. Mas travado !=
+    confirmado: enquanto isso, verifica a cada segundo (imagem + telemetria
+    em conjunto, não só o marcador de travado):
+      supercruise ligado + assist_active   -> alinhado, conta para os 3s
+      supercruise ligado + align_warning   -> ainda desalinhado apesar do
+                                               marcador -- retoma a correção
+                                               de imediato, não espera os 3s
+    Só confirma sucesso depois de 3 segundos SEGUIDOS com supercruise+
+    assist_active (a nave acelera e oscila muito mesmo depois do assist
+    ligar, por isso a exigência de estabilidade em vez da primeira deteção).
+
+    Usado ao ligar o assist pela primeira vez e outra vez depois de um plano
+    de fuga bem sucedido reengatar o assist a meio da viagem (ver
+    monitorar_viagem).
+
+    Devolve True quando a validação final confirma, ou a string
     "chegada_curta" se a nave chegar ao destino (telemetria + Journal
-    confirmam) antes mesmo de o icone alguma vez estabilizar 3x seguidas --
-    saltos curtos (estacao perto do ponto de entrada em Supercruise) podem
-    terminar em menos de 60s, e isso NAO e uma falha (a nave chegou mesmo),
-    so um falso alarme deste watchdog. Confirmado em jogo real: chegada as
-    ~35s depois de engatar o assist, watchdog abortou aos 60s na mesma. """
-    contagem_limpo = 0
+    confirmam) antes mesmo do alvo travar -- saltos curtos (estacao perto do
+    ponto de entrada em Supercruise) podem terminar em menos de 60s, e isso
+    NAO e uma falha (a nave chegou mesmo), so um falso alarme deste
+    watchdog. Confirmado em jogo real: chegada as ~35s depois de engatar o
+    assist, watchdog abortou aos 60s na mesma. """
+    nave_ativa = olho.obter_modelo_nave_atual()
+    MONITOR_CONFIG, CX_NEUTRO, CY_NEUTRO = olho.carregar_dados_calibracao(nave_ativa)
+
     timeout_assist = time.time() + 60
-    while contagem_limpo < 3:
-        if time.time() > timeout_assist:
-            abortar_com_erro("Timeout (60s). Supercruise Assist não apareceu no HUD.")
+    travado_desde = None
 
-        flags = ler_telemetria()
-        if not bool(flags & STATUS_FLAGS["SUPERCRUISE"]) and confirmar_chegada_por_journal():
-            msg = "Chegada confirmada (telemetria+Journal) antes do ícone ASSIST_ACTIVE alguma vez estabilizar -- salto curto de mais para este watchdog."
-            print(f"[OK] {msg}")
-            logging.info(f"aguardar_assist_no_hud: {msg}")
-            return "chegada_curta"
+    with mss.mss() as sct:
+        try:
+            monitor_jogo = sct.monitors[1]
+        except Exception:
+            monitor_jogo = sct.monitors[0]
+        area_bussola = {
+            "top": monitor_jogo["top"] + MONITOR_CONFIG["top"],
+            "left": monitor_jogo["left"] + MONITOR_CONFIG["left"],
+            "width": MONITOR_CONFIG["width"], "height": MONITOR_CONFIG["height"]
+        }
 
-        if not procurar_template(templates['assist_active'], "ASSIST ACTIVE", MONITOR_CENTER, 0.75):
-            contagem_limpo = 0
-        else:
-            contagem_limpo += 1
-        time.sleep(1)
-    return True
+        while True:
+            if time.time() > timeout_assist:
+                abortar_com_erro("Timeout (60s). Supercruise Assist não travou no alvo (2 triângulos) no HUD.")
+
+            flags = ler_telemetria()
+            em_supercruise = bool(flags & STATUS_FLAGS["SUPERCRUISE"])
+            if not em_supercruise and confirmar_chegada_por_journal():
+                msg = "Chegada confirmada (telemetria+Journal) antes do alvo alguma vez travar -- salto curto de mais para este watchdog."
+                print(f"[OK] {msg}")
+                logging.info(f"aguardar_assist_no_hud: {msg}")
+                return "chegada_curta"
+
+            # Threshold 0.65 -- mais baixo que os outros templates deste
+            # ficheiro (0.75-0.82) de propósito, para tolerar a oscilação da
+            # nave logo após o assist ligar. Ainda por afinar com mais voos
+            # reais, como os outros valores "primeiro palpite" neste projeto.
+            travado_agora = procurar_template(templates['assist_locked'], "ASSIST LOCKED (2 triangulos)", MONITOR_CENTER, 0.65, debug=True)
+
+            if not travado_agora:
+                # Ainda não travou -- continua a corrigir enquanto o aviso
+                # de desalinhamento estiver visível (mesmo comportamento de
+                # antes de o marcador de travado alguma vez aparecer).
+                travado_desde = None
+                if procurar_template(templates['align_warning'], "ASSIST LIGADO MAS DESALINHADO", MONITOR_CENTER, 0.82):
+                    olho.executar_passo_alinhamento(sct, area_bussola, CX_NEUTRO, CY_NEUTRO)
+                    time.sleep(0.2)
+                else:
+                    time.sleep(1)
+                continue
+
+            # Travado (2 triângulos) -- parado de corrigir. Confirma tick a
+            # tick com imagem+telemetria em vez de assumir sucesso só pelo
+            # marcador de travado (ver docstring).
+            if em_supercruise and procurar_template(templates['assist_active'], "ASSIST ACTIVE", MONITOR_CENTER, 0.75, debug=True):
+                if travado_desde is None:
+                    travado_desde = time.time()
+                    print("[LOG] Em supercruise e alinhado -- a confirmar estabilidade (3s)...")
+                elif time.time() - travado_desde >= 3.0:
+                    print("[OK] Assist confirmado -- supercruise + alinhado, estável 3s seguidos.")
+                    return True
+            elif em_supercruise and procurar_template(templates['align_warning'], "ASSIST INACTIVE (desalinhado apesar do travado)", MONITOR_CENTER, 0.82, debug=True):
+                print("[LOG] Em supercruise mas ainda desalinhado -- a retomar correção (não espera os 3s).")
+                travado_desde = None
+                olho.executar_passo_alinhamento(sct, area_bussola, CX_NEUTRO, CY_NEUTRO)
+            # else: frame ambíguo (nem ACTIVE nem INACTIVE reconhecidos) --
+            # não reinicia a contagem, só não avança nem corrige.
+
+            time.sleep(1)
 
 def monitorar_viagem():
     print("\n>>> FASE 2: Viagem em Supercruise...")

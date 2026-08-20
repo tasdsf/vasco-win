@@ -127,6 +127,15 @@ def _calibrar_fase_periodo(observacoes, cfg, raio_bloqueio,
         est = o.get('estado')
         if est not in ('visivel', 'oclusos'):
             continue
+        # Só observações manuais ('linux'/'win') calibram o ajuste -- as
+        # automáticas ('auto-linux'/'auto-win') já não são inseridas na BD
+        # (ver supercruise_assist.py/leg_state.py), mas registos antigos
+        # ainda podiam lá estar. origem ausente = fallback local do JSON,
+        # que só contém observações manuais por construção (los_calibrar.py)
+        # -- não descartar essas.
+        origem = o.get('origem')
+        if origem is not None and origem not in ('linux', 'win'):
+            continue
         try:
             t = datetime.fromisoformat(o['timestamp_utc'])
         except Exception:
@@ -264,7 +273,7 @@ def _obter_observacoes_db(script_dir, sistema):
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT timestamp_utc, estado, nota FROM los_observacoes "
+                "SELECT timestamp_utc, estado, nota, origem FROM los_observacoes "
                 "WHERE sistema = %s ORDER BY timestamp_utc;",
                 (sistema,),
             )
@@ -273,13 +282,14 @@ def _obter_observacoes_db(script_dir, sistema):
         conn.close()
 
     observacoes = []
-    for ts, estado, nota in linhas:
+    for ts, estado, nota, origem in linhas:
         if ts.tzinfo is not None:
             ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
         observacoes.append({
             "timestamp_utc": ts.strftime("%Y-%m-%dT%H:%M:%S"),
             "estado": estado,
             "nota": nota,
+            "origem": origem,
         })
     return observacoes
 

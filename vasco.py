@@ -16,6 +16,8 @@ import keyboard
 
 # ADICIONADO: Importar a função do verificador de linha de visão
 from los_checker import calcular_espera_los
+from discord_notify import notificar_erro_discord
+from leg_state import reiniciar_leg_limpa, marcar_leg_suja
 
 # Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
 # usados para espaçamento visual no terminal).
@@ -101,6 +103,21 @@ SEQUENCE = {
     12: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock na estacao de origem"},
 }
 
+def _notificar_falha_discord(script_name, error_msg):
+    """ Notifica o Discord só quando uma etapa esgota TODOS os retries.
+    Único ponto de integração para todas as etapas -- em vez de mexer em
+    cada script individual.
+
+    Anexa o screenshot de erro mais recente (logs/erro_*.png) se tiver
+    menos de 30s -- só se for mesmo desta falha, não de uma anterior.
+    Best-effort: nunca pode impedir o orquestrador de continuar. """
+    try:
+        candidatos = sorted(LOG_DIR.glob("erro_*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        imagem_path = str(candidatos[0]) if candidatos and (time.time() - candidatos[0].stat().st_mtime) < 30 else None
+        notificar_erro_discord(script_name, error_msg, imagem_path)
+    except Exception as e:
+        print(f"[AVISO] Falha ao notificar Discord: {e}")
+
 def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5):
     script_path = SCRIPT_DIR / script_name
     if not script_path.exists():
@@ -150,6 +167,7 @@ def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5):
             else:
                 error_msg = f"Exit code: {returncode}\nOutput: {full_output[:5000]}"
                 logger.error(f"Etapa {script_name} falhou: retorno {returncode}")
+                marcar_leg_suja()
                 if attempt < max_retries - 1:
                     print(f"\n[AVISO] Retry {attempt+1}/{max_retries} falhou. Esperando {retry_delay}s...")
                     time.sleep(retry_delay)
@@ -161,6 +179,7 @@ def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5):
             proc.kill()
             error_msg = f"Timeout: {timeout} segundos excedidos"
             logger.error(f"Timeout em {script_name}")
+            marcar_leg_suja()
             if attempt < max_retries - 1:
                 print(f"\n[AVISO] Timeout. Retry {attempt+1}/{max_retries}...")
                 time.sleep(retry_delay)
@@ -170,6 +189,7 @@ def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5):
         except subprocess.SubprocessError as e:
             error_msg = str(e)
             logger.exception(f"Erro subprocess: {e}")
+            marcar_leg_suja()
             if attempt < max_retries - 1:
                 print(f"\n[AVISO] Erro subprocess. Retry...")
                 time.sleep(retry_delay)
@@ -177,8 +197,10 @@ def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5):
                 return False, error_msg, "SUBPROCESS_ERROR"
         except Exception as e:
             logger.exception(f"Erro inesperado: {e}")
+            marcar_leg_suja()
             return False, f"Excecao: {e}", "EXCEPTION"
-    
+
+    marcar_leg_suja()
     return False, "Falha maxima atingida", "MAX_RETRIES"
 
 def main():
@@ -238,10 +260,13 @@ def main():
         while current_step <= len(SEQUENCE):
             print_header()
             step_info = SEQUENCE[current_step]
-            
+
+            if step_info["name"] == "UNDOCKING":
+                reiniciar_leg_limpa()
+
             print(f"[ETAPA {current_step}] {step_info['name']}: {step_info['desc']}")
             print()
-            
+
             success, error_msg, error_code = executar_script(
                 step_info["script"],
                 timeout=step_info.get("timeout", 600),
@@ -265,6 +290,7 @@ def main():
             else:
                 # Falha - requer intervencao
                 print(f"\n[FALHA DETETADA] Etapa {current_step} ({step_info['name']}): {error_msg}")
+                _notificar_falha_discord(step_info["script"], error_msg)
                 print(f"Opcoes:")
                 print("  1 - Retry manual (ignora erros anteriores)")
                 print("  2 - Fallback (operação cega, executada manualmente)")
