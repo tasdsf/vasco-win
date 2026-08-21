@@ -402,6 +402,57 @@ def aplicar_manobra_hud(dx, dy):
             for t in teclas_ad: pydirectinput.keyUp(t)
         time.sleep(2.0) # Mantidos os 2 segundos estruturais de estabilização
 
+_janela_debug_iniciada = False
+
+def mostrar_debug_visual(passo, cx_neutro, cy_neutro):
+    """ Mostra a mesma janela de debug visual do modo standalone (bloco
+    VISUAL_DEBUG do __main__ abaixo) -- reutilizável por quem chama
+    executar_passo_alinhamento() de fora (ex: supercruise_assist.py), que
+    por omissão corre às cegas, sem nenhum feedback visual. Recebe o dict
+    devolvido por executar_passo_alinhamento(). """
+    global _janela_debug_iniciada
+    if not _janela_debug_iniciada:
+        cv2.namedWindow(NOME_JANELA_PROD, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(NOME_JANELA_PROD, 300, 350)
+        _janela_debug_iniciada = True
+
+    img_bussola = passo["img_bussola"]
+    coords_bola = passo["coords_bola"]
+    encontrou_hud = passo["encontrou_hud"]
+    comando_display = passo["comando_display"]
+
+    img_hud_bussola = img_bussola.copy()
+    cv2.rectangle(img_hud_bussola, (cx_neutro - DEAD_ZONE_BUSSOLA, cy_neutro - DEAD_ZONE_BUSSOLA),
+                           (cx_neutro + DEAD_ZONE_BUSSOLA, cy_neutro + DEAD_ZONE_BUSSOLA), (255, 255, 255), 1)
+    cv2.circle(img_hud_bussola, (cx_neutro, cy_neutro), 1, (0, 165, 255), -1)
+    if coords_bola:
+        cv2.circle(img_hud_bussola, coords_bola, 3, (0, 255, 0), -1)
+
+    view_zoom = cv2.resize(img_hud_bussola, (300, 350), interpolation=cv2.INTER_NEAREST)
+    cv2.putText(view_zoom, comando_display, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0) if encontrou_hud else (0, 165, 255), 1)
+
+    cv2.imshow(NOME_JANELA_PROD, view_zoom)
+    cv2.waitKey(1)
+
+def fechar_debug_visual():
+    """ Fecha a janela aberta por mostrar_debug_visual(), se alguma vez foi
+    criada -- a chamar por quem usa executar_passo_alinhamento()/
+    mostrar_debug_visual() de fora (ex: supercruise_assist.py) assim que o
+    alinhamento fica confirmado e deixa de chamar estas funções. Sem isto a
+    janela fica órfã: deixa de ser bombeada por cv2.waitKey() (só acontece
+    dentro de mostrar_debug_visual) e o Windows marca-a "(Not Responding)"
+    -- confundiu-se com o processo inteiro ter travado num caso real (ver
+    diagnóstico desta conversa). Mesmo padrão do Vasco-Nobara/Linux, que
+    chama cv2.destroyWindow() antes de devolver o controlo em
+    _alinhar_com_olho(). """
+    global _janela_debug_iniciada
+    if _janela_debug_iniciada:
+        try:
+            cv2.destroyWindow(NOME_JANELA_PROD)
+        except Exception:
+            pass
+        _janela_debug_iniciada = False
+
 def executar_roll_recuperacao(tentativa):
     """ Roda a nave ~45 graus sobre o eixo longitudinal para tirar um planeta
     ou um brilho da frente do HUD/alvo. Nao mexe na direcao do nariz. """

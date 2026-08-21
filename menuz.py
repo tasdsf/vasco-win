@@ -38,10 +38,11 @@ SCRIPTS = {
 }
 
 # Sequência completa de viagem
+# 'olho' removido daqui -- o alinhamento ja acontece durante o proprio
+# supercruise (engatar_assist_e_alinhar em supercruise_assist.py).
 VIAGEM = [
     "select_target",
     "undocking",
-    "olho",
     "supercruise",
     "docking"
 ]
@@ -75,7 +76,7 @@ def exibir_menu():
     print()
     print("1 - Comprar    → comprar.py")
     print("2 - Vender     → vender.py")
-    print("3 - Viajar     → select_target → undocking → olho → supercruise → docking")
+    print("3 - Viajar     → select_target → undocking → supercruise → docking")
     print("0 - Sair")
     print("-"*60)
 
@@ -142,7 +143,7 @@ def executar_viagem():
     """Executa a sequência completa de viagem"""
     logger.info("Iniciando sequência de viagem")
     print("\n" + "="*60)
-    print("      VIAGEM COMPLETA (select_target → undocking → olho → supercruise → docking)")
+    print("      VIAGEM COMPLETA (select_target → undocking → supercruise → docking)")
     print("="*60)
     print("="*60)
     
@@ -210,7 +211,6 @@ def main():
             print("  Sequência automática:")
             print("    → select_target_station.py")
             print("    → undocking.py")
-            print("    → olho.py")
             print("    → supercruise_assist.py")
             print("    → docking.py")
             
@@ -232,7 +232,7 @@ def print_header():
     print()
     print("1 - Comprar    → comprar.py")
     print("2 - Vender     → vender.py")
-    print("3 - Viajar     → select_target → undocking → olho → supercruise → docking")
+    print("3 - Viajar     → select_target → undocking → supercruise → docking")
     print("0 - Sair")
     print("-"*60)
 

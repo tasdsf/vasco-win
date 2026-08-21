@@ -40,10 +40,32 @@ logging.basicConfig(
     format='%(asctime)s - [SELECT_TARGET] - %(levelname)s - %(message)s'
 )
 
+def _capturar_screenshot_erro():
+    """ Grava o ecrã inteiro do jogo em logs/erro_<timestamp>.png -- da
+    contexto visual ao anexar-se automaticamente a notificacao do Discord
+    (ver discord_notify.notificar_erro_discord / vasco.py::
+    _notificar_falha_discord, que so anexa um erro_*.png com menos de 30s).
+    Mesmo padrao ja usado em supercruise_assist.py/undocking.py -- faltava
+    aqui, por isso as falhas deste script nunca levavam imagem ao Discord.
+    Best-effort: uma falha aqui nao pode impedir o abort em curso. """
+    try:
+        caminho = os.path.join(pasta_logs, f"erro_{int(time.time())}.png")
+        with mss.mss() as sct:
+            try:
+                monitor_jogo = sct.monitors[1]
+            except Exception:
+                monitor_jogo = sct.monitors[0]
+            img_bgra = np.array(sct.grab(monitor_jogo))
+            cv2.imwrite(caminho, cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR))
+        print(f"[SCREENSHOT] Erro gravado em {caminho}")
+    except Exception as e:
+        print(f"[AVISO] Falha ao gravar screenshot de erro: {e}")
+
 def abortar_com_erro(mensagem):
     """ Regista o erro no log e dispara exit code 1 para o Orquestrador intercetar """
     print(f"\n[FATAL] {mensagem}")
     logging.error(mensagem)
+    _capturar_screenshot_erro()
     pydirectinput.press('backspace')
     sys.exit(1)
 
@@ -297,40 +319,55 @@ def marcar_destino_dinamico():
     pydirectinput.press('d'); time.sleep(0.5)
     
     # Watchdog: Varrer a lista em busca do alvo (Máximo de 25 tentativas / scrolls)
+    #
+    # 'templates['carrier']' é um ícone GENÉRICO de "isto é um fleet carrier"
+    # -- não distingue o Zahir de nenhum outro carrier no sistema. Quando há
+    # mais do que um carrier listado (caso real: Fujin System, ver
+    # diagnóstico desta conversa -- o varrimento parou em "BABAOU WHF-5XQ",
+    # dono CMDR BABAOH, nada a ver com o Zahir), o varrimento parava no
+    # primeiro candidato, abria o popup, e só aí validava o nome -- se não
+    # batesse, abortava sem tentar outro candidato. Como o varrimento é
+    # determinístico (mesma lista, mesma ordem), isto falhava sempre da
+    # mesma forma em todos os retries. Agora, se o popup não confirma o
+    # nome esperado, fecha-o (Backspace) e continua a varrer os candidatos
+    # seguintes em vez de desistir logo no primeiro.
+    template_confirm = 'zahir_confirm' if tipo_alvo == "carrier" else 'futen_confirm'
+    nome_confirm = "ZAHIR" if tipo_alvo == "carrier" else "FUTEN SPACEPORT"
     achou = False
     for i in range(25):
         print(f"[SCAN {i+1}/25]")
         # Usa threshold dinâmico baseado no tipo de alvo. debug=True imprime os
         # valores reais de match no terminal durante o próprio varrimento.
         if procurar_alvo_dinamico(tipo_alvo, MONITOR_PANEL, threshold_matching, debug=True):
-            print(f"\n>>> FASE: ACHOU ({label_alvo})...")
+            print(f"\n>>> FASE: candidato ({label_alvo}) encontrado -- a validar nome...")
             time.sleep(2.4) # Dá tempo ao menu do painel pop-up para renderizar
-            achou = True
-            break
+            pydirectinput.press('space')
+            time.sleep(1.0)
+
+            # Validação de alvo: confirma pelo título do popup que abriu que o
+            # candidato é mesmo o esperado (Zahir para carrier, Futen Spaceport
+            # para estação), antes de fazer lock. Calibrado com
+            # images/find_area.png (ecrã real de Futen Spaceport): o template
+            # correto (futen_target_confirm) bate a 0.976 nesse ecrã, o
+            # template errado (zahir_target_confirm) fica a 0.451 no mesmo
+            # ecrã -- margem ampla acima do limiar de 0.80. Falta calibração
+            # equivalente no sentido inverso (ecrã real do Zahir); assume-se
+            # por semelhança visual da UI (mesmo estilo de caixa/ícone/texto).
+            if procurar_template(templates[template_confirm], f"CONFIRM {nome_confirm}", MONITOR_PANEL, 0.80, debug=True):
+                print(f"\n>>> FASE: ACHOU ({label_alvo})...")
+                achou = True
+                break
+
+            print(f"[AVISO] Candidato não é '{nome_confirm}' -- a fechar popup e continuar a varrer.")
+            pydirectinput.press('backspace')
+            time.sleep(1.0)
+
         pydirectinput.press('s')
         time.sleep(0.7)  # Antes 0.4s: tempo curto a mais fazia saltar por cima da
                           # linha antes da seleção/scroll do painel acabar de renderizar
-    
-    if not achou:
-        abortar_com_erro(f"Alvo dinâmico '{label_alvo}' não encontrado na lista de navegação após 25 varrimentos.")
-    
-    print(f"\n>>> FASE: Selecionando ({label_alvo})...")
-    time.sleep(1.0)
-    pydirectinput.press('space')
-    time.sleep(1.0)
 
-    # Validação de alvo: confirma pelo título do popup que abriu que o alvo
-    # é mesmo o esperado (Zahir para carrier, Futen Spaceport para estação),
-    # antes de fazer lock. Calibrado com images/find_area.png (ecrã real de
-    # Futen Spaceport): o template correto (futen_target_confirm) bate a
-    # 0.976 nesse ecrã, o template errado (zahir_target_confirm) fica a
-    # 0.451 no mesmo ecrã -- margem ampla acima do limiar de 0.80. Falta
-    # calibração equivalente no sentido inverso (ecrã real do Zahir); assume-se
-    # por semelhança visual da UI (mesmo estilo de caixa/ícone/texto).
-    template_confirm = 'zahir_confirm' if tipo_alvo == "carrier" else 'futen_confirm'
-    nome_confirm = "ZAHIR" if tipo_alvo == "carrier" else "FUTEN SPACEPORT"
-    if not procurar_template(templates[template_confirm], f"CONFIRM {nome_confirm}", MONITOR_PANEL, 0.80, debug=True):
-        abortar_com_erro(f"Validação de alvo falhou: o popup aberto não confirma '{nome_confirm}' ({label_alvo}). Pode ter aberto o alvo errado -- lock cancelado.")
+    if not achou:
+        abortar_com_erro(f"Alvo '{label_alvo}' ('{nome_confirm}') não encontrado na lista de navegação após 25 varrimentos (candidatos com o ícone certo mas nome errado foram ignorados).")
 
     # Verificação de Bloqueio (Lock)
     if procurar_template(templates['unlocked'], "UNLOCKED", MONITOR_PANEL, 0.80):
@@ -343,6 +380,14 @@ def marcar_destino_dinamico():
     else:
         # Não lança erro fatal aqui porque o jogo às vezes ofusca o botão com partículas holográficas
         print(f"[AVISO] Não foi possível validar visualmente o Lock no {label_alvo}. Assumindo sucesso cego.")
+        # Captura o ecrã ANTES do 'space' às cegas -- suspeita (ver diagnóstico
+        # desta conversa) de que este ramo ambíguo (nem UNLOCKED nem LOCKED
+        # detetados) é o que deixa o destino num estado que depois faz o
+        # engatar_assistencia_menu() do supercruise_assist.py falhar a
+        # ativar o Assist (D+Space cai no botão errado). Sem evidência
+        # visual até agora -- este print é a forma de a apanhar da próxima
+        # vez que acontecer.
+        _capturar_screenshot_erro()
         pydirectinput.press('space')
         
     pydirectinput.press('1') # Fecha o painel

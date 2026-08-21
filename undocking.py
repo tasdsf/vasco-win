@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import glob
+import json
 import logging
 import pydirectinput
 import cv2
@@ -97,6 +99,12 @@ def focar_jogo_seguro():
 MONITOR_MENU = {"top": 1100, "left": 1080, "width": 420, "height": 400}
 MONITOR_CORNER = {"top": 100, "left": 1900, "width": 370, "height": 280}
 
+STATUS_FILE = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Frontier Developments', 'Elite Dangerous', 'Status.json')
+ED_LOG_DIR = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Frontier Developments', 'Elite Dangerous')
+
+FSD_MASS_LOCKED_FLAG = 0x10000
+MASS_LOCK_CONFIRMACOES = 2  # detecoes consecutivas exigidas antes de aceitar o sinal (evita 1 leitura a meio da escrita do ficheiro)
+
 pasta_imagens = os.path.join(diretorio_atual, 'images')
 
 templates_nomes = {
@@ -170,6 +178,148 @@ def procurar_template(template, nome_label, monitor, threshold=0.85):
             cv2.waitKey(1)
         
         return encontrou, max_val
+
+# ==========================================
+# 2b. TELEMETRIA E CONTEXTO (JOURNAL/STATUS)
+# ==========================================
+def ler_cargo_telemetria():
+    try:
+        with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f).get("Cargo", 0)
+    except Exception:
+        return 0
+
+def ler_telemetria_flags():
+    try:
+        with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f).get("Flags", 0)
+    except Exception:
+        return 0
+
+def get_latest_log():
+    lista_logs = glob.glob(os.path.join(ED_LOG_DIR, 'Journal.*.log'))
+    if not lista_logs: return None
+    return max(lista_logs, key=os.path.getctime)
+
+def obter_tamanho_atual_log():
+    latest_log = get_latest_log()
+    if not latest_log: return 0
+    try:
+        return os.path.getsize(latest_log)
+    except Exception:
+        return 0
+
+def ler_novos_eventos(posicao_ancora):
+    latest_log = get_latest_log()
+    if not latest_log: return []
+    try:
+        tamanho_atual = os.path.getsize(latest_log)
+        if tamanho_atual <= posicao_ancora:
+            return []
+        with open(latest_log, 'r', encoding='utf-8') as f:
+            f.seek(posicao_ancora)
+            linhas_novas = f.readlines()
+        eventos = []
+        for linha in linhas_novas:
+            try:
+                data = json.loads(linha)
+                if 'event' in data:
+                    eventos.append(data)
+            except json.JSONDecodeError:
+                continue
+        return eventos
+    except Exception as e:
+        print(f"[ERRO] Falha ao ler stream de logs: {e}")
+        return []
+
+def obter_tipo_estacao_atual():
+    """ Le o Journal para tras a procura do ultimo evento Docked/Undocked/
+    Location com 'StationType' -- mesma deteccao ja usada em
+    select_target.py::obter_alvo_contextual_log(), so que aqui so interessa
+    o tipo de estacao onde estamos agora, nao o proximo alvo. Devolve
+    'FleetCarrier', outro valor de StationType, ou None se nao encontrar
+    nenhum evento valido. """
+    latest_log = get_latest_log()
+    if not latest_log: return None
+    try:
+        with open(latest_log, 'r', encoding='utf-8') as f:
+            linhas = f.readlines()
+        for linha in reversed(linhas):
+            try:
+                data = json.loads(linha)
+            except json.JSONDecodeError:
+                continue
+            if 'StationType' in data and data.get('event') in ('Docked', 'Undocked', 'Location'):
+                return data['StationType']
+        return None
+    except Exception as e:
+        print(f"[AVISO] Falha ao ler o Journal para contexto de estacao: {e}")
+        return None
+
+def validar_carga_antes_de_descolar():
+    """ So vale a pena descolar do carrier SEM carga a bordo (a venda ja
+    aconteceu) e so vale a pena descolar da estacao COM carga a bordo (a
+    compra ja aconteceu) -- sem isto a nave descolava as cegas e so se
+    descobria a compra/venda falhada no fim de uma viagem inteira de
+    supercruise (ver ESTACAO_ORIGEM em supercruise_assist.py, que fazia
+    esta validacao tarde demais, ja a meio do salto). Aborta antes de
+    qualquer tecla de descolagem se a carga nao bater com o local onde
+    estamos. Se o tipo de estacao nao for determinavel (sem evento
+    Docked/Location no Journal), nao bloqueia -- so avisa. """
+    tipo_estacao = obter_tipo_estacao_atual()
+    cargo_atual = ler_cargo_telemetria()
+    print(f"[CONTEXTO] Local atual: {tipo_estacao or 'desconhecido'} | Carga a bordo: {cargo_atual}")
+
+    if tipo_estacao == 'FleetCarrier' and cargo_atual and cargo_atual > 0:
+        abortar_com_erro(
+            f"Ainda ha carga a bordo ({cargo_atual}) no Fleet Carrier -- a venda nao foi "
+            f"confirmada. A parar antes de descolar sem vender."
+        )
+    elif tipo_estacao is not None and tipo_estacao != 'FleetCarrier' and not cargo_atual:
+        abortar_com_erro(
+            "Sem carga a bordo na estacao -- a compra nao foi confirmada. "
+            "A parar antes de descolar sem comprar."
+        )
+    elif tipo_estacao is None:
+        print("[AVISO] Tipo de estacao atual desconhecido (sem evento Docked/Location no Journal) -- validacao de carga saltada.")
+
+def aguardar_no_fire_zone_exit(ancora_log, timeout=60):
+    """ Gate final apos o boost de saida (sequencia_salto): confirma que a
+    nave saiu mesmo da no-fire-zone da estacao/carrier antes de entregar o
+    controlo ao supercruise_assist.py. Duplo sinal, portado do
+    Vasco-Nobara/Linux (ja validado em producao la): o evento 'No fire zone
+    exited' do Journal (autoritativo, mas pode nao chegar a tempo se a
+    sessao do Journal ficar presa) OU, em alternativa, a flag
+    FSD_MASS_LOCKED da telemetria (Status.json) a desligar-se -- sinal de
+    estado em tempo real e direto do jogo, sem depender de escrita no
+    Journal. Exige duas leituras seguidas sem Mass Lock para nao confiar
+    numa unica leitura a meio da escrita do ficheiro. Assim que qualquer um
+    dos dois confirma, o supercruise pode arrancar de imediato. """
+    print(f"\n>>> FASE: A confirmar saída da no-fire-zone via Journal + Telemetria (timeout {timeout}s)...")
+    timeout_real = time.time() + timeout
+    confirmacoes_mass_lock = 0
+
+    while time.time() < timeout_real:
+        for evento in ler_novos_eventos(ancora_log):
+            if evento.get('event') == 'ReceiveText' and evento.get('Message') == '$STATION_NoFireZone_exited;':
+                print("[OK] 'No fire zone exited' confirmado pelo Journal.")
+                logging.info("No fire zone exited confirmado (Journal) -- handoff para supercruise autorizado.")
+                return True
+
+        flags = ler_telemetria_flags()
+        if not bool(flags & FSD_MASS_LOCKED_FLAG):
+            confirmacoes_mass_lock += 1
+            if confirmacoes_mass_lock >= MASS_LOCK_CONFIRMACOES:
+                print("[OK] 'No fire zone exited' confirmado pela telemetria (FSD_MASS_LOCKED desligado) -- Journal não confirmou a tempo.")
+                logging.info("No fire zone exited confirmado (Telemetria FSD_MASS_LOCKED) -- handoff para supercruise autorizado.")
+                return True
+        else:
+            confirmacoes_mass_lock = 0
+
+        time.sleep(0.5)
+
+    falar("Warning. Still inside station no fire zone.")
+    abortar_com_erro("Timeout à espera de 'No fire zone exited' no Journal/Telemetria. A nave pode estar presa/bloqueada perto da estação.")
 
 # ==========================================
 # 3. MÁQUINA DE ESTADOS DETERMINÍSTICA
@@ -321,7 +471,6 @@ def sequencia_salto():
     pydirectinput.keyUp('.')
     pydirectinput.press('tab')
     time.sleep(15.0)
-    pydirectinput.press('x')
     time.sleep(8.0)
 
 # ==========================================
@@ -329,14 +478,18 @@ def sequencia_salto():
 # ==========================================
 if __name__ == "__main__":
     inicializar_infraestrutura()
-    
+
     print("O R2D2 assume os comandos em 1 segundos...")
     time.sleep(1)
-    
+
+    validar_carga_antes_de_descolar()
+    ancora_log = obter_tamanho_atual_log()
+
     sucesso_execucao = executar_auto_launch()
     if sucesso_execucao:
         aguardar_saida_estacao()
         sequencia_salto()
-        
+        aguardar_no_fire_zone_exit(ancora_log)
+
     if VISUAL_DEBUG:
         cv2.destroyAllWindows()

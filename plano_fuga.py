@@ -5,10 +5,19 @@ como chegada (interdicao, mass lock inesperado, obstaculo, etc.).
 
 Chamado por supercruise_assist.py::monitorar_viagem() quando a queda da
 flag SUPERCRUISE nao vem acompanhada de um SupercruiseDestinationDrop no
-Journal (ver esse ficheiro para o criterio de deteccao). Reaproveita as
-funcoes de visao do olho.py (executar_passo_alinhamento) em vez de duplicar
-a logica de alinhamento -- essa e a unica dependencia entre ficheiros aqui;
-o resto (logging, telemetria, abortar_com_erro) segue o mesmo padrao de
+Journal (ver esse ficheiro para o criterio de deteccao).
+
+Ciclo de evasao portado do Vasco-Nobara/Linux (ja validado em producao la):
+evasao incondicional (boost + heatsink) -> valida por telemetria se o FSD
+esta disponivel -> tenta 'j', repete ate confirmar carga -> acelera e
+espera confirmar Supercruise. NAO tenta alinhar nada durante a evasao/carga
+-- com a nave a oscilar em velocidade nenhuma leitura de bussola/HUD e de
+confiar, e entrar em Supercruise nao exige apontar a nada (so sair dela
+para um alvo especifico e que precisa). A reentrada no Supercruise Assist
+(menu + alinhamento) fica a cargo do chamador (monitorar_viagem), que ja
+faz isso apos este modulo devolver o controlo.
+
+O resto (logging, telemetria, abortar_com_erro) segue o mesmo padrao de
 duplicacao local ja usado em todos os outros scripts do projeto.
 """
 
@@ -18,9 +27,6 @@ import time
 import json
 import logging
 import pydirectinput
-import mss
-
-import olho
 
 # ==========================================
 # 0. LOGGING E INFRAESTRUTURA
@@ -89,21 +95,23 @@ def ler_telemetria(debug=False):
 # convem ser mais generoso sem dados reais que o justifiquem.
 LIMITE_FUGA = 180.0
 
-def confirmar_saida_supercruise(timeout=5):
-    """ Confirma pela telemetria que SUPERCRUISE ja caiu antes de comecar o
-    ciclo -- o chamador (monitorar_viagem) ja detetou a queda, isto e so a
-    segunda confirmacao independente pedida explicitamente. Nao bloqueia o
-    ciclo se o timeout esgotar (nao e critico o suficiente para abortar). """
-    print("[PLANO_FUGA] A confirmar (telemetria) que saimos de Supercruise...")
-    limite = time.time() + timeout
-    while time.time() < limite:
-        flags = ler_telemetria(debug=True)
-        if not bool(flags & STATUS_FLAGS["SUPERCRUISE"]):
-            print("[OK] Fora de Supercruise confirmado pela telemetria.")
-            return True
-        time.sleep(0.5)
-    print(f"[AVISO] Nao foi possivel confirmar a saida de Supercruise em {timeout}s pela telemetria. A prosseguir na mesma.")
-    return False
+# Cooldown pos-boost: o impulso do boost deixa a nave a oscilar (arfagem/
+# momentum) por um instante -- ler telemetria logo a seguir apanha o alvo
+# instavel. Valor portado do Vasco-Nobara/Linux.
+COOLDOWN_EVASIVO = 1.5
+
+def _passo_evasivo():
+    """ 'shiftright' (100% de aceleracao) + 'tab' (boost) + 'v' (heatsink --
+    baixa o calor da nave, dificultando que o inimigo mantenha o alvo por
+    eletronica), incondicional e ciclico. Nao tenta alinhar nada aqui -- com
+    velocidade a nave oscila demais para qualquer leitura de bussola/HUD ser
+    de confiar; entrar em Supercruise nao exige apontar a nada, por isso a
+    fuga foca-se so em ganhar distancia e perder o lock de quem estiver a
+    perseguir. Portado do Vasco-Nobara/Linux, ja validado em producao. """
+    pydirectinput.press('shiftright')
+    pydirectinput.press('tab')
+    pydirectinput.press('v')
+    time.sleep(COOLDOWN_EVASIVO)
 
 def pode_saltar_agora(debug=False):
     """ Valida por telemetria se faz sentido tentar 'j' neste ciclo -- sem
@@ -111,12 +119,8 @@ def pode_saltar_agora(debug=False):
     de salto ja usadas em supercruise_assist.py::iniciar_salto_seguro(). Se
     detetar hardpoints em baixo, recolhe-os logo ('u') e devolve False nesta
     volta -- da tempo a animacao de recolha antes de tentar o salto na volta
-    seguinte, em vez de tentar 'j' no mesmo instante em que 'u' foi enviado.
-    Mass lock nao tem remedio por tecla (so afastar-nos, o que o boost ja
-    esta a fazer), por isso so e reportado, nao remediado. Nao verifica
-    FSD_CHARGING aqui: se ja estiver a carregar, o proprio
-    tentar_saltar_com_alinhamento() trata disso (mantem o alinhamento em vez
-    de reenviar 'j'). """
+    seguinte. Mass lock nao tem remedio por tecla (so afastar-nos, o que o
+    boost ja esta a fazer), por isso so e reportado, nao remediado. """
     flags = ler_telemetria(debug=debug)
     mass_locked = bool(flags & STATUS_FLAGS["FSD_MASS_LOCKED"])
     hardpoints = bool(flags & STATUS_FLAGS["HARDPOINTS_DEPLOYED"])
@@ -129,99 +133,60 @@ def pode_saltar_agora(debug=False):
 
     return not mass_locked
 
-def tentar_saltar_com_alinhamento(sct, area_bussola, cx_neutro, cy_neutro, timeout=30):
-    """ Pressiona 'j' + 'shiftright' para iniciar a carga do FSD e MANTEM o
-    alinhamento com o olho.py durante toda a carga, ate confirmar por
-    telemetria que entramos mesmo em Supercruise (nao so que a carga
-    comecou) -- desviar o nariz a meio da carga pode cancelar o salto, por
-    isso o alinhamento nao pode parar so porque a carga arrancou. 30s cobre a
-    duracao tipica de uma carga de FSD para Supercruise com alguma margem --
-    estimativa inicial, nao calibrada com dados reais. Devolve True/False em
-    vez de abortar -- uma falha aqui significa 'volta ao inicio do ciclo',
-    nao 'morre'. """
-    print("[PLANO_FUGA] FSD disponível -- a enviar 'j' + 'shiftright' e a manter alinhamento até entrar em Supercruise...")
-    pydirectinput.press('j')
-    pydirectinput.press('shiftright')
-
+def aguardar_supercruise_confirmado(timeout=30):
+    """ Copia local minima de supercruise_assist.py::aguardar_supercruise_confirmado
+    -- mesmo padrao de duplicacao ja usado neste ficheiro (ver nota no
+    topo). Devolve True/False em vez de abortar -- uma falha aqui significa
+    'volta ao inicio do ciclo', nao 'morre'. """
     limite = time.time() + timeout
-    flags = 0
     while time.time() < limite:
         flags = ler_telemetria(debug=True)
         if bool(flags & STATUS_FLAGS["SUPERCRUISE"]):
-            print("[OK] Supercruise confirmado -- salto concluído.")
-            logging.info(f"Plano de fuga: Supercruise confirmado após tentativa de salto (flags={hex(flags)}).")
             return True
-        olho.executar_passo_alinhamento(sct, area_bussola, cx_neutro, cy_neutro)
-        time.sleep(0.3)
-
-    print(f"[AVISO] Supercruise não confirmado em {timeout}s apesar do alinhamento contínuo. Últimas flags: {hex(flags)}")
-    logging.info(f"Plano de fuga: tentativa de salto sem confirmação de Supercruise em {timeout}s (flags={hex(flags)}).")
+        time.sleep(0.5)
     return False
 
 def executar_fuga():
     """ Ponto de entrada chamado por supercruise_assist.py. Ciclo, em cada
-    volta: velocidade maxima + boost (imprescindivel para sobreviver,
-    incondicional) -> valida por telemetria se o FSD esta disponivel agora
-    (sem mass lock, sem hardpoints) -> se sim, tenta 'j' e mantem o
-    alinhamento durante a carga; se nao, so o boost desta volta conta e
-    repete. Devolve True em caso de sucesso; aborta o processo (180s) se
-    nunca conseguir. A reentrada no Supercruise Assist (menu) fica a cargo
-    do chamador (monitorar_viagem), que ja faz isso apos este retornar. """
+    volta: evasao incondicional (_passo_evasivo) -> valida por telemetria se
+    o FSD esta disponivel agora (pode_saltar_agora) -> se sim, tenta 'j' +
+    'shiftright' e confirma se o FSD passou mesmo a carregar; se nao, so a
+    evasao desta volta conta e repete. Depois de confirmar carga, espera a
+    confirmacao de Supercruise pela telemetria antes de devolver o controlo.
+    Devolve True em caso de sucesso; aborta o processo (180s) se nunca
+    conseguir reentrar em Supercruise. """
     print("\n>>> PLANO DE FUGA: queda de Supercruise nao identificada como chegada. A iniciar ciclo de fuga.")
     logging.info("Plano de fuga acionado.")
-    confirmar_saida_supercruise()
-
-    nave_ativa = olho.obter_modelo_nave_atual()
-    MONITOR_CONFIG, CX_NEUTRO, CY_NEUTRO = olho.carregar_dados_calibracao(nave_ativa)
-    print(f"[PLANO_FUGA] Nave: {nave_ativa} | Calibracao: {MONITOR_CONFIG}")
 
     inicio = time.time()
     tentativas = 0
 
-    with mss.mss() as sct:
-        try:
-            monitor_jogo = sct.monitors[1]
-        except Exception:
-            monitor_jogo = sct.monitors[0]
+    while time.time() - inicio < LIMITE_FUGA:
+        tentativas += 1
+        print(f"\n[PLANO_FUGA] Ciclo {tentativas}: velocidade maxima + boost + heatsink (sobrevivencia)...")
+        _passo_evasivo()
 
-        area_bussola = {
-            "top": monitor_jogo["top"] + MONITOR_CONFIG["top"],
-            "left": monitor_jogo["left"] + MONITOR_CONFIG["left"],
-            "width": MONITOR_CONFIG["width"], "height": MONITOR_CONFIG["height"]
-        }
+        if not pode_saltar_agora(debug=True):
+            print("[PLANO_FUGA] FSD indisponivel agora (mass lock ou hardpoints) -- so evasao nesta volta, sem tentar 'j'.")
+            continue
 
-        while time.time() - inicio < LIMITE_FUGA:
-            tentativas += 1
-            print(f"\n[PLANO_FUGA] Ciclo {tentativas}: velocidade maxima + boost + heatsink (sobrevivência)...")
-            pydirectinput.press('shiftright')
-            pydirectinput.press('tab')
-            # Heatsink ('v') -- baixa o calor da nave, dificultando que o
-            # inimigo mantenha o alvo por eletrónica. Consumivel (a nave tem
-            # 2 lançadores, ver Loadout) -- reposição fica para depois, por
-            # agora dispara-se em todos os ciclos e o proprio jogo ignora se
-            # estiver em cooldown ou sem carga.
-            pydirectinput.press('v')
+        print("[PLANO_FUGA] FSD disponivel -- a enviar 'j' + 'shiftright'...")
+        pydirectinput.press('j')
+        pydirectinput.press('shiftright')
+        time.sleep(1.5)
 
-            # Cooldown pos-boost: o impulso do boost deixa a nave a oscilar
-            # (arfagem/momentum) por um instante -- ler telemetria/alinhamento
-            # logo a seguir apanha o alvo instavel. 1.5s e uma estimativa
-            # inicial, nao calibrada com dados reais -- ajustar se os logs
-            # mostrarem problemas.
-            time.sleep(1.5)
+        if bool(ler_telemetria(debug=True) & STATUS_FLAGS["FSD_CHARGING"]):
+            print("[PLANO_FUGA] FSD a carregar -- a confirmar Supercruise pela telemetria...")
+            logging.info(f"Plano de fuga: FSD confirmado a carregar na tentativa {tentativas}.")
+            if aguardar_supercruise_confirmado():
+                print("[PLANO_FUGA] Supercruise confirmado. Fuga bem sucedida.")
+                logging.info(f"Plano de fuga: sucesso na tentativa {tentativas} ({time.time()-inicio:.1f}s).")
+                return True
+            print("[AVISO] Supercruise nao confirmado apesar do FSD a carregar -- a repetir o ciclo.")
+        else:
+            print("[AVISO] FSD nao confirmou carga apos 'j' -- a repetir o ciclo.")
 
-            if pode_saltar_agora(debug=True):
-                logging.info(f"Plano de fuga: FSD disponível na tentativa {tentativas}, a saltar.")
-                if tentar_saltar_com_alinhamento(sct, area_bussola, CX_NEUTRO, CY_NEUTRO):
-                    print("[PLANO_FUGA] Salto confirmado. Fuga bem sucedida.")
-                    logging.info(f"Plano de fuga: sucesso na tentativa {tentativas} ({time.time()-inicio:.1f}s).")
-                    return True
-                print("[AVISO] Salto não confirmado apesar do FSD disponível -- a repetir o ciclo.")
-            else:
-                print("[PLANO_FUGA] FSD indisponível agora (mass lock ou hardpoints) -- só boost nesta volta, sem tentar 'j'.")
-
-            time.sleep(0.5)
-
-    abortar_com_erro(f"Plano de fuga excedeu {LIMITE_FUGA}s sem conseguir saltar ({tentativas} tentativas).")
+    abortar_com_erro(f"Plano de fuga excedeu {LIMITE_FUGA}s sem conseguir reentrar em Supercruise ({tentativas} tentativas).")
 
 if __name__ == "__main__":
     executar_fuga()

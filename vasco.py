@@ -91,16 +91,17 @@ SEQUENCE = {
     1: {"name": "COMPRAR", "script": SCRIPTS["comprar"], "desc": "Comprar Fujin Tea na estacao atual"},
     2: {"name": "TARGET_CARRIER", "script": SCRIPTS["target_carrier"], "desc": "Selecionar Zahir como destino"},
     3: {"name": "UNDOCKING", "script": SCRIPTS["undocking"], "desc": "Undock da estacao"},
-    4: {"name": "OLHO", "script": SCRIPTS["olho"], "desc": "Verificar status da mira/reticule"},
-    5: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
-    6: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock no fleet carrier"},
-    7: {"name": "VENDER", "script": SCRIPTS["vender"], "desc": "Vender Fujin Tea no Zahir"},
-    8: {"name": "SELECT_STATION", "script": SCRIPTS["station"], "desc": "Selecionar estacao de origem"},
-    9: {"name": "UNDOCKING", "script": SCRIPTS["undocking"], "desc": "Undock da estacao"},
-    10: {"name": "OLHO", "script": SCRIPTS["olho"], "desc": "Verificar status da mira/reticule"},
-    11: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
+    # OLHO removido daqui -- o alinhamento ja acontece durante o proprio
+    # SUPERCRUISE (engatar_assist_e_alinhar em supercruise_assist.py corrige
+    # ativamente o alinhamento antes de confirmar o assist).
+    4: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
+    5: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock no fleet carrier"},
+    6: {"name": "VENDER", "script": SCRIPTS["vender"], "desc": "Vender Fujin Tea no Zahir"},
+    7: {"name": "SELECT_STATION", "script": SCRIPTS["station"], "desc": "Selecionar estacao de origem"},
+    8: {"name": "UNDOCKING", "script": SCRIPTS["undocking"], "desc": "Undock da estacao"},
+    9: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
     # Corrigido: esta etapa faz dock na estacao de origem (fim do ciclo), nao no fleet carrier.
-    12: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock na estacao de origem"},
+    10: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock na estacao de origem"},
 }
 
 def _notificar_falha_discord(script_name, error_msg):
@@ -220,7 +221,8 @@ def main():
         completed_steps = state.get("completed_steps", [])
         
         # VALIDAR LOS PARA DESCOLAR SOMENTE SE VALER A PENA
-        if current_step in (3, 9):
+        # Etapas UNDOCKING (renumeradas apos remocao do OLHO da SEQUENCE).
+        if current_step in (3, 8):
             espera = calcular_espera_los(ed_log_dir=ED_LOG_DIR)
             if espera and espera > 0:
                 h, resto = divmod(int(espera), 3600)

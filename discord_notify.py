@@ -37,7 +37,12 @@ def notificar_erro_discord(origem, mensagem, imagem_path=None):
         return False
     try:
         import requests
-        payload = {"content": f"🔴 **[{HOST_ID}] {origem}**\n{mensagem}"}
+        LIMITE_CONTENT_DISCORD = 2000  # limite rigido da API do Discord para "content"
+        content = f"🔴 **[{HOST_ID}] {origem}**\n{mensagem}"
+        if len(content) > LIMITE_CONTENT_DISCORD:
+            sufixo = "\n… (truncado)"
+            content = content[:LIMITE_CONTENT_DISCORD - len(sufixo)] + sufixo
+        payload = {"content": content}
         if imagem_path and os.path.exists(imagem_path):
             with open(imagem_path, "rb") as f:
                 resp = requests.post(

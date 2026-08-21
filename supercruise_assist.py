@@ -25,6 +25,10 @@ PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGS_DIR = os.path.join(PROJECT_DIR, "logs")
 IMAGES_DIR = os.path.join(PROJECT_DIR, "images")
 os.makedirs(LOGS_DIR, exist_ok=True)
+# Ultima captura de procurar_template(), sobrescrita a cada chamada -- da
+# evidencia forense de qualquer falha sem depender de VISUAL_DEBUG (mesmo
+# padrao ja usado em undocking.py).
+LOG_TEST = os.path.join(LOGS_DIR, "supercruise_test.png")
 
 logging.basicConfig(
     filename=os.path.join(LOGS_DIR, "r2d2_combined.log"),
@@ -120,6 +124,7 @@ def focar_jogo_seguro():
 MONITOR_CENTER = {"top": 100, "left": 400, "width": 1100, "height": 800}
 MONITOR_PANEL = {"top": 200, "left": 50, "width": 1000, "height": 1200}
 STATUS_FILE = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Frontier Developments', 'Elite Dangerous', 'Status.json')
+ED_LOG_DIR = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Frontier Developments', 'Elite Dangerous')
 
 STATUS_FLAGS = {
     "SUPERCRUISE": 0x10,
@@ -129,6 +134,14 @@ STATUS_FLAGS = {
     "INTERDICTION": 0x800000,
 }
 
+# Leituras seguidas de "fora de Supercruise" exigidas antes de confiar na
+# flag e ir verificar o Journal -- mesmo padrao do MASS_LOCK_CONFIRMACOES em
+# undocking.py. ler_telemetria() devolve flags=0 (silenciosamente) em
+# qualquer falha de leitura do Status.json, o que por si so já parecia
+# "fora de Supercruise" -- uma única leitura a meio de uma reescrita do
+# ficheiro não pode valer como confirmação.
+CONFIRMACOES_FORA_SUPERCRUISE = 2
+
 TEMPLATES_NOMES = {
     'nav_tab': 'NAVIGATION_SELECTED.png',
     'charging': 'CHARGING.png',
@@ -137,8 +150,9 @@ TEMPLATES_NOMES = {
     'assist_active': 'SUPERCRUISE_ASSIST_ACTIVE.png',
     'align_warning': 'SUPERCRUISE_ASSIST_INACTIVE.png',
     # 'Dois triangulos azuis' que aparecem um pouco acima do aviso de
-    # desalinhamento quando o alvo fica travado -- usado em
-    # aguardar_assist_no_hud() para saber quando parar de corrigir.
+    # desalinhamento quando o alvo fica travado -- carregado mas ja nao
+    # usado por nenhuma funcao (engatar_assist_e_alinhar deixou de depender
+    # deste marcador, ver essa funcao). Mantido caso volte a ser util.
     'assist_locked': 'SUPERCRUISE_ASSIST_LOCKED.png',
     'throttle_up': 'THROTTLE_UP.png',
     # Reaproveitados de select_target.py (mesmas imagens, mesmo MONITOR_PANEL)
@@ -161,10 +175,17 @@ except Exception as e:
 # ==========================================
 # 2. MOTORES CORE (VISÃO E DADOS)
 # ==========================================
-def procurar_template(template, nome_label, monitor, threshold=0.75, debug=False):
-    with mss.mss() as sct:
-        img_bgra = np.array(sct.grab(monitor))
+def procurar_template(template, nome_label, monitor, threshold=0.75, debug=False, sct=None):
+    # sct opcional -- reutiliza uma sessão mss já aberta em vez de abrir e
+    # fechar uma nova a cada chamada. Criar/destruir sessões mss repetidas
+    # vezes por segundo (como em engatar_assist_e_alinhar, que faz 2-3
+    # chamadas por tick durante até 60s) pode bloquear a API de captura de
+    # ecrã do Windows por vários segundos de cada vez -- suspeito de causar
+    # os hangs observados em jogo real (ver diagnóstico desta conversa).
+    def _procurar(sessao):
+        img_bgra = np.array(sessao.grab(monitor))
         img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+        cv2.imwrite(LOG_TEST, img_bgr)
         res = cv2.matchTemplate(img_bgr, template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
         encontrou = max_val >= threshold
@@ -183,6 +204,11 @@ def procurar_template(template, nome_label, monitor, threshold=0.75, debug=False
             cv2.waitKey(1)
 
         return encontrou
+
+    if sct is not None:
+        return _procurar(sct)
+    with mss.mss() as _sct:
+        return _procurar(_sct)
 
 def ler_telemetria(debug=False):
     try:
@@ -211,24 +237,6 @@ def ler_destino_telemetria(debug=False):
             print(f"    [DESTINO] Falha a ler {STATUS_FILE}: {e}")
         return None
 
-def ler_cargo_telemetria(debug=False):
-    try:
-        with open(STATUS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            cargo = data.get("Cargo", 0)
-            if debug:
-                print(f"    [CARGA] {cargo}")
-            return cargo
-    except Exception as e:
-        if debug:
-            print(f"    [CARGA] Falha a ler {STATUS_FILE}: {e}")
-        return 0
-
-# Estacao de origem do ciclo comprar->vender (ver vasco.py SEQUENCE) -- se
-# houver carga a bordo e o destino do salto for esta, a venda no carrier
-# falhou nalgures e a nave esta prestes a regressar sem vender.
-ESTACAO_ORIGEM = "Futen Spaceport"
-
 def _registar_los_se_perna_limpa():
     """ Só regista a observação automática de LOS se a perna atual
     (undocking->supercruise, ver leg_state.py) não teve nenhum erro/retry
@@ -241,7 +249,23 @@ def _registar_los_se_perna_limpa():
         print("[LOS-AUTO] Perna com erro/retry -- observação não registada "
               "(evita contaminar o ajuste com um salto que pode ter tido ajuda).")
 
-def confirmar_chegada_por_journal():
+def get_latest_log():
+    lista_logs = glob.glob(os.path.join(ED_LOG_DIR, 'Journal.*.log'))
+    if not lista_logs: return None
+    return max(lista_logs, key=os.path.getmtime)
+
+def obter_tamanho_atual_log():
+    """ Posição (bytes) no fim do Journal atual, neste instante -- usada
+    como âncora em confirmar_chegada_por_journal() para que essa função só
+    veja eventos escritos DEPOIS deste ponto, nunca de uma perna anterior. """
+    latest_log = get_latest_log()
+    if not latest_log: return 0
+    try:
+        return os.path.getsize(latest_log)
+    except Exception:
+        return 0
+
+def confirmar_chegada_por_journal(ancora_log=None):
     """ Confirma se a queda de Supercruise mais recente foi mesmo uma chegada
     intencional ao destino trancado. Percorre o Journal para trás a partir do
     'SupercruiseExit' mais recente e vê qual destes aparece primeiro:
@@ -252,18 +276,27 @@ def confirmar_chegada_por_journal():
     aguenta eventos irrelevantes (Music, ReceiveText, etc.) pelo meio. Devolve
     False para qualquer causa que não seja chegada (interdição, mass lock
     inesperado, obstáculo) sem as distinguir -- só precisamos de saber se foi
-    ou não foi chegada. """
+    ou não foi chegada.
+
+    ancora_log (opcional, posição em bytes de obter_tamanho_atual_log()):
+    se dado, ignora tudo o que foi escrito no Journal ANTES desta posição --
+    sem isto, "o SupercruiseExit mais recente no ficheiro" podia ser de uma
+    perna anterior (uma chegada legítima já confirmada há minutos), e um
+    'em_supercruise' falsamente False por um instante (Status.json a meio de
+    reescrita) confirmava "chegada" com base em dados completamente
+    desatualizados -- foi isto que aconteceu num caso real (ver diagnóstico
+    desta conversa: chegada_curta declarada no mesmo segundo em que o
+    alinhamento arrancou, sem a nave ter chegado a lado nenhum). """
     EVENTOS_FRONTEIRA = {"SupercruiseDestinationDrop", "SupercruiseEntry", "StartJump"}
     try:
-        ed_log_dir = os.path.join(os.environ['USERPROFILE'], 'Saved Games',
-                                  'Frontier Developments', 'Elite Dangerous')
-        lista_logs = glob.glob(os.path.join(ed_log_dir, 'Journal.*.log'))
-        if not lista_logs:
+        ultimo_log = get_latest_log()
+        if not ultimo_log:
             print("[AVISO] Sem ficheiros de Journal encontrados -- a assumir que NÃO foi chegada.")
             return False
 
-        ultimo_log = max(lista_logs, key=os.path.getmtime)
         with open(ultimo_log, 'r', encoding='utf-8') as f:
+            if ancora_log:
+                f.seek(ancora_log)
             linhas = [linha for linha in f.readlines() if linha.strip()]
 
         idx_exit = None
@@ -372,17 +405,10 @@ def iniciar_salto_seguro():
     print(f"[DIAGNOSTICO] {msg_diag}")
     logging.info(msg_diag)
 
-    # Trava de segurança: se há carga a bordo e o destino é a estação de
-    # origem, a venda no carrier falhou nalgures (ou o destino trocou por
-    # engano entre tentativas) e a nave está prestes a regressar sem vender.
-    # Mais vale parar aqui e pedir intervenção do que voltar com carga.
-    cargo_atual = ler_cargo_telemetria(debug=True)
-    if cargo_atual and cargo_atual > 0 and destino_nome == ESTACAO_ORIGEM:
-        abortar_com_erro(
-            f"Carga a bordo ({cargo_atual:.0f}) mas o destino do salto é a estação de origem "
-            f"('{ESTACAO_ORIGEM}') -- a venda não foi confirmada e a nave estava prestes a "
-            f"regressar sem vender. A parar para intervenção manual em vez de prosseguir."
-        )
+    # Trava de carga a bordo movida para undocking.py::validar_carga_antes_de_descolar()
+    # -- so vale a pena descolar do carrier sem carga (venda confirmada) ou
+    # descolar da estacao com carga (compra confirmada). Detetar isso aqui,
+    # ja a meio do salto, era tarde demais.
 
     # Se um retry anterior já deixou a nave em Supercruise (ex.: o salto teve
     # sucesso mas engatar_assistencia_menu falhou a seguir, o processo abortou,
@@ -517,13 +543,29 @@ def assist_ja_ativo():
 def engatar_assistencia_menu():
     print("\n>>> FASE 1: Navegação no Painel Esquerdo...")
 
-    # Confirma o estado do assist ANTES de abrir o painel -- os templates só
-    # são visíveis no HUD com o painel fechado. Usado no passo 3 para decidir
-    # se o D+Space (toggle) deve ser enviado ou saltado.
-    assist_estava_ativo = assist_ja_ativo()
-
-    # Reduzir velocidade antes de mexer nos menus
+    # Reduzir velocidade ANTES de qualquer leitura de HUD -- a nave oscila em
+    # velocidade de supercruise, e nenhuma leitura de bússola/HUD (nem os
+    # templates assist_active/align_warning usados por assist_ja_ativo()
+    # abaixo) é de confiar sem isto. O 'x' por si só não chega -- a nave não
+    # trava instantaneamente, por isso a pausa a seguir é essencial (sem
+    # ela, assist_ja_ativo() lia o ecrã quase ao mesmo tempo do 'x', com a
+    # nave ainda a oscilar -- confirmado em jogo real: rolls de recuperação
+    # a disparar por leitura de bússola pouco fiável logo à entrada).
     pydirectinput.press('x')
+    time.sleep(1.5)
+
+    # 'já está ligado, não mexer' -- D+Space lá dentro do painel é um
+    # TOGGLE, não um "ligar": se esta função for chamada outra vez (retry
+    # depois de uma falha mais à frente no fluxo, com o Assist já a
+    # funcionar), abrir o painel e voltar a D+Space desligava o que já
+    # estava a funcionar. assist_ja_ativo() já cobre os dois sub-estados
+    # (ativo a apontar, ou ativo mas ainda à espera de alinhamento) -- só se
+    # avança para o toggle quando NENHUM dos dois aparece. Padrão adotado do
+    # Vasco-Nobara/Linux: sai logo aqui em vez de só saltar o D+Space mais à
+    # frente -- mais simples e mais seguro.
+    if assist_ja_ativo():
+        print(">>> Assistência já parece ligada (ativa, ou ativa mas ainda não alinhada) -- nada a fazer.")
+        return True
 
     # Alvo esperado (para validar visualmente o passo 2) -- reaproveita a
     # mesma logica/templates de select_target.py, lido fresco da telemetria
@@ -602,21 +644,19 @@ def engatar_assistencia_menu():
         logging.error(f"engatar_assistencia_menu: painel de confirmação do alvo '{nome_alvo}' não apareceu após 3 tentativas.")
         abortar_com_erro(f"Falha crítica: painel de confirmação do alvo '{nome_alvo}' não apareceu após 3 tentativas.")
 
-    # 3. Selecionar o Supercruise Assist (D -> Space) -- só ativa se ainda
-    # não estava ligado antes de abrir o painel (assist_estava_ativo). D+Space
-    # é um toggle: enviá-lo com o assist já ligado desliga-o em vez de o
-    # ligar -- foi isto que desligou o assist com o alvo já trancado num
-    # caso real (ver diagnóstico desta conversa).
-    if assist_estava_ativo:
-        print("[OK] Supercruise Assist já estava ligado antes de abrir o painel -- a saltar D+Space.")
-    else:
-        print(">>> Movendo para o botão Supercruise Assist (D)...")
-        pydirectinput.press('d')
-        time.sleep(0.5)
+    # 3. Selecionar o Supercruise Assist (D -> Space). Chega-se aqui sempre
+    # com o Assist desligado -- o early return de assist_ja_ativo() no topo
+    # da função já tratou o caso "já ligado, não mexer" (D+Space é um
+    # toggle: enviá-lo com o assist já ligado desliga-o em vez de o ligar --
+    # foi isto que desligou o assist com o alvo já trancado num caso real,
+    # ver diagnóstico desta conversa).
+    print(">>> Movendo para o botão Supercruise Assist (D)...")
+    pydirectinput.press('d')
+    time.sleep(0.5)
 
-        print(">>> Ativando Assistência (Space)...")
-        pydirectinput.press('space')
-        time.sleep(1.0)
+    print(">>> Ativando Assistência (Space)...")
+    pydirectinput.press('space')
+    time.sleep(1.0)
 
     # Fecha o painel -- Backspace (UI Back) em vez de '1', que também é um
     # toggle e podia reabrir o painel em vez de o fechar se o estado do menu
@@ -625,8 +665,24 @@ def engatar_assistencia_menu():
     # painel preso aberto a receber as teclas de direção do alinhamento
     # (olho.py) em vez do jogo, num caso real (ver diagnóstico desta
     # conversa).
+    #
+    # 2x Backspace por tentativa (mesmo padrão já usado nos passos 1 e 2
+    # desta função) -- um só Backspace pode só recuar do sub-ecrã de
+    # confirmação do D+Space para OUTRO sub-ecrã do mesmo painel (ainda
+    # aberto), onde a aba NAVIGATION também não bate; isso já fez o código
+    # declarar "fechado" cedo demais com o painel ainda aberto por baixo
+    # (ver diagnóstico desta conversa). Um combinado com assist_ja_ativo()
+    # foi tentado a seguir a esse bug, mas revelou-se um erro diferente:
+    # confundia "painel fechado" com "Assist ligou" -- quando o D+Space
+    # falhava em ativar o Assist (bug separado, ver abaixo), o painel
+    # fechava normalmente mas o código continuava a reportar "painel não
+    # fechou", um diagnóstico errado (confirmado em jogo real: 3 screenshots
+    # de erro seguidos, todos com o cockpit limpo e o painel genuinamente
+    # fechado). Por isso esta verificação volta a ser só sobre o painel.
     painel_fechado = False
     for _ in range(3):
+        pydirectinput.press('backspace')
+        time.sleep(0.3)
         pydirectinput.press('backspace')
         time.sleep(0.5)
         if not procurar_template(templates['nav_tab'], "NAV TAB (a confirmar fecho do painel)", MONITOR_PANEL, 0.80, debug=True):
@@ -638,25 +694,96 @@ def engatar_assistencia_menu():
         logging.error("engatar_assistencia_menu: painel não fechou após 3 tentativas de Backspace.")
         abortar_com_erro("Falha crítica: painel não fechou após ativar o Supercruise Assist -- a parar antes de mandar teclas de alinhamento para um menu ainda aberto.")
 
-    logging.info(f"engatar_assistencia_menu: sequência concluída (NAV confirmado, alvo={nome_alvo or 'N/D'} confirmado, D+Space {'saltado (assist já ligado)' if assist_estava_ativo else 'enviado'}).")
-    print(">>> Painel fechado. Voltando ao Cockpit.")
+    # Confirma que o Assist REALMENTE ligou -- D+Space (passo 3, acima) é às
+    # cegas, sem nenhum template dentro do painel a confirmar o toggle; só
+    # dá para confirmar já com o painel fechado, pelos templates do HUD
+    # central (assist_ja_ativo(), os mesmos usados no early-return do topo
+    # desta função). Sem isto, um D+Space que por qualquer razão não tenha
+    # acertado no botão (ex.: painel ainda a assentar) passava despercebido
+    # -- o processo avançava para o alinhamento sem o Assist estar
+    # realmente ativo, e só falhava bem mais tarde, no timeout do
+    # engatar_assist_e_alinhar(), sem apontar à causa real. Poll com
+    # margem (até 2s) em vez de uma leitura única -- o banner pode demorar
+    # um instante a aparecer mesmo com o toggle já aplicado.
+    assist_confirmado = False
+    for _ in range(4):
+        if assist_ja_ativo():
+            assist_confirmado = True
+            break
+        time.sleep(0.5)
 
-def engatar_assist_e_alinhar(timeout=30):
+    if not assist_confirmado:
+        logging.error("engatar_assistencia_menu: painel fechou mas Supercruise Assist não mostrou nenhum sinal de estar ativo (nem ASSIST_ACTIVE nem align_warning) após D+Space.")
+        abortar_com_erro("Falha crítica: Supercruise Assist não ativou -- painel fechou normalmente mas D+Space não teve o efeito esperado no HUD.")
+
+    logging.info(f"engatar_assistencia_menu: sequência concluída (NAV confirmado, alvo={nome_alvo or 'N/D'} confirmado, D+Space enviado, Assist confirmado ativo).")
+    print(">>> Painel fechado. Assist confirmado. Voltando ao Cockpit.")
+
+def engatar_assist_e_alinhar(timeout=150, ancora_log=None):
     """ Sequência padrão ao entrar em Supercruise -- usada tanto no arranque
     normal (executar) como depois de plano_fuga.executar_fuga() confirmar
     reentrada: reengata o Supercruise Assist do jogo (engatar_assistencia_menu,
     que já começa com 'x' para estabilizar antes de mexer nos menus, e já
-    tem a sua própria validação/recuperação), e só depois ativa o olho.py a
-    alinhar -- com o assist já ligado o alvo "atrai" e centra rápido. Não
-    aborta se não alinhar dentro do timeout: o assist do jogo, uma vez
-    ligado, continua a corrigir por conta própria -- isto é só um empurrão
-    inicial, não uma garantia. A validação de que o assist ficou mesmo ativo
-    fica a cargo de quem chama a seguir (aguardar_assist_no_hud, que já usa
-    o template assist_active/SUPERCRUISE_ASSIST_ACTIVE.png para isso). """
+    tem a sua própria validação/recuperação, incluindo o "já está ligado,
+    não mexer") e corrige o alinhamento (olho.py) até confirmar por DOIS
+    caminhos independentes -- o que confirmar primeiro (padrão adotado do
+    Vasco-Nobara/Linux, já validado em produção; substitui a versão anterior
+    desta função + aguardar_assist_no_hud, que dependia do marcador "dois
+    triângulos azuis" -- assist_locked -- e nunca chegou a confirmar com
+    fiabilidade em jogo real):
+
+      (a) TELEMETRIA + BANNER: supercruise ligado + banner ASSIST_ACTIVE
+          visível no HUD, sustentados 3s SEGUIDOS -- não depende da
+          calibração da bússola (CX_NEUTRO/CY_NEUTRO), só de dois sinais
+          diretos do jogo. Enquanto este caminho estiver a progredir, não
+          se manda nenhum impulso manual (olho.py) por cima -- o Assist já
+          está a "puxar" a nave sozinho, e um impulso extra pode ultrapassar
+          a janela apertada de alinhamento e reacender o aviso do jogo.
+      (b) BÚSSOLA/HUD + SEM AVISO DO JOGO: olho.executar_passo_alinhamento()
+          reporta 'alinhado_frame' (bússola ALINHADO_MACRO ou retículo do
+          HUD travado) E o aviso nativo do jogo ("ALIGN WITH TARGET
+          DESTINATION", template align_warning) NÃO está visível,
+          sustentados 3s SEGUIDOS. O aviso do jogo prevalece sobre a
+          bússola/HUD -- só a bússola/HUD já deu falsos positivos com o
+          aviso do jogo ainda bem visível no ecrã.
+
+    Devolve True quando confirmado, ou a string "chegada_curta" se a nave
+    chegar ao destino (telemetria + Journal confirmam, ANCORADOS a
+    ancora_log -- ver confirmar_chegada_por_journal) antes de qualquer um
+    dos dois caminhos confirmar -- saltos curtos (estação perto do ponto de
+    entrada em Supercruise) podem terminar em menos do que este watchdog
+    demora a confirmar, e isso NÃO é uma falha (a nave chegou mesmo). A
+    deteção de "chegada_curta" exige, por esta ordem: (1) CONFIRMACOES_FORA_SUPERCRUISE
+    leituras seguidas da flag SUPERCRUISE desligada -- uma leitura única
+    pode ser só um glitch do Status.json a meio de reescrita; (2) o aviso
+    'ALIGN WITH TARGET DESTINATION' (template align_warning) NÃO estar
+    visível -- se ainda estiver, é impossível ter havido chegada, mais
+    barato e mais rápido de verificar do que ir ao Journal; (3) só depois
+    disso confirma pelo Journal, ancorado a ancora_log para nunca
+    reaproveitar um SupercruiseDestinationDrop de uma perna anterior (bug
+    real confirmado em produção: chegada_curta declarada no mesmo segundo
+    em que o alinhamento arrancou, sem a nave ter chegado a lado nenhum --
+    ver diagnóstico desta conversa).
+    Aborta (timeout, default 150s -- mesmo valor ja validado em producao no
+    Vasco-Nobara/Linux) se nenhum dos dois caminhos confirmar. """
     engatar_assistencia_menu()
 
+    logging.info("engatar_assist_e_alinhar: a obter modelo da nave e calibração...")
     nave_ativa = olho.obter_modelo_nave_atual()
     MONITOR_CONFIG, CX_NEUTRO, CY_NEUTRO = olho.carregar_dados_calibracao(nave_ativa)
+
+    TEMPO_ESTABILIDADE = 3.0
+    limite = time.time() + timeout
+    tempo_confirmado_telemetria = None
+    tempo_confirmado_bussola = None
+    ultimo_heartbeat = 0.0
+    confirmacoes_fora_supercruise = 0
+    # Recuperacao por roll quando a bussola fica cega (planeta/brilho a
+    # tapar a leitura) -- executar_passo_alinhamento() e deliberadamente sem
+    # estado (ver a sua docstring: "rolls de recuperacao ficam a cargo de
+    # quem chama"), por isso este estado vive aqui.
+    rolls_recuperacao = 0
+
     with mss.mss() as sct:
         try:
             monitor_jogo = sct.monitors[1]
@@ -667,117 +794,113 @@ def engatar_assist_e_alinhar(timeout=30):
             "left": monitor_jogo["left"] + MONITOR_CONFIG["left"],
             "width": MONITOR_CONFIG["width"], "height": MONITOR_CONFIG["height"]
         }
-        limite = time.time() + timeout
-        while time.time() < limite:
+        logging.info(f"engatar_assist_e_alinhar: sessão de captura aberta -- a iniciar loop de deteção (timeout {timeout}s).")
+
+        while True:
+            # Heartbeat a cada ~10s -- se isto parar de aparecer no log mas o
+            # processo continuar "vivo" no Gestor de Tarefas, o bloqueio está
+            # dentro de uma única iteração (procurar_template/olho), não
+            # entre iterações.
+            if time.time() - ultimo_heartbeat > 10:
+                ultimo_heartbeat = time.time()
+                logging.info(f"engatar_assist_e_alinhar: heartbeat (restam {limite - time.time():.0f}s de timeout).")
+
+            if time.time() > limite:
+                abortar_com_erro(f"Timeout ({timeout}s). Alinhamento pós-assist nunca confirmado (nem telemetria+banner, nem bússola/HUD+sem aviso do jogo).")
+
+            flags = ler_telemetria()
+            em_supercruise = bool(flags & STATUS_FLAGS["SUPERCRUISE"])
+            if em_supercruise:
+                confirmacoes_fora_supercruise = 0
+            else:
+                confirmacoes_fora_supercruise += 1
+
+            if confirmacoes_fora_supercruise >= CONFIRMACOES_FORA_SUPERCRUISE:
+                # Veto barato antes de ir ao Journal: 'ALIGN WITH TARGET
+                # DESTINATION' só aparece com o Assist ligado e ainda em
+                # Supercruise -- se ainda estiver visível, a leitura da
+                # flag só pode ter sido um glitch (Status.json a meio de
+                # reescrita), não uma chegada real.
+                ainda_avisa_chegada = procurar_template(templates['align_warning'], "ALIGN WARNING (veto de chegada_curta)", MONITOR_CENTER, 0.82, debug=True, sct=sct)
+                if ainda_avisa_chegada:
+                    print("[AVISO] Telemetria sugere fora de Supercruise, mas 'ALIGN WITH TARGET DESTINATION' ainda visível -- não é chegada, provável glitch de leitura.")
+                    confirmacoes_fora_supercruise = 0
+                elif confirmar_chegada_por_journal(ancora_log=ancora_log):
+                    msg = "Chegada confirmada (telemetria+Journal, ancorados a este salto) antes do alinhamento confirmar -- salto curto de mais para este watchdog."
+                    print(f"[OK] {msg}")
+                    logging.info(f"engatar_assist_e_alinhar: {msg}")
+                    olho.fechar_debug_visual()
+                    return "chegada_curta"
+
+            # Caminho (a): telemetria + banner ASSIST_ACTIVE, sustentados 3s.
+            banner_ativo = procurar_template(templates['assist_active'], "ASSIST ACTIVE", MONITOR_CENTER, 0.75, debug=True, sct=sct)
+            if em_supercruise and banner_ativo:
+                if tempo_confirmado_telemetria is None:
+                    tempo_confirmado_telemetria = time.time()
+                    print("[LOG] Telemetria + banner ASSIST ACTIVE confirmam -- a validar estabilidade (3s)...")
+                elif time.time() - tempo_confirmado_telemetria >= TEMPO_ESTABILIDADE:
+                    print("[OK] Confirmado por telemetria + banner ASSIST ACTIVE, estável 3s seguidos.")
+                    logging.info("engatar_assist_e_alinhar: confirmado via telemetria+banner.")
+                    olho.fechar_debug_visual()
+                    return True
+                # Assist já a puxar visivelmente -- sem impulso manual por
+                # cima (ver docstring). Print explícito (em vez de só a
+                # ausência de "[INFO] ... IMPULSO_*" do olho.py) para tornar
+                # isto visível linha a linha no log, sem ter de inferir pela
+                # falta de output.
+                print("[LOG] Assist a puxar -- sem correção manual.")
+                tempo_confirmado_bussola = None
+                time.sleep(0.2)
+                continue
+
+            tempo_confirmado_telemetria = None
+
+            # Caminho (b): bússola/HUD (olho.py) + sem aviso do jogo,
+            # sustentados 3s. Corrige ativamente enquanto não confirma.
             passo = olho.executar_passo_alinhamento(sct, area_bussola, CX_NEUTRO, CY_NEUTRO)
-            if passo["alinhado_frame"]:
-                print("[OK] Alvo centrado -- Supercruise Assist assume a partir daqui.")
-                return
+            olho.mostrar_debug_visual(passo, CX_NEUTRO, CY_NEUTRO)
+
+            # Bussola cega (coords_bola None -- "NÃO_DETETADO"): tenta um
+            # roll de recuperação JÁ NO PRIMEIRO frame, sem esperar
+            # TEMPO_CEGO_ANTES_ROLL (8s, valor do loop standalone em
+            # olho.py, pensado para um contexto diferente). O roll em si é
+            # "pequeno" -- só ~45 graus de orientação (TECLA_ROLL/
+            # TEMPO_ROLL_45 já calibrados em olho.py), não muda o rumo, por
+            # isso reagir de imediato é mais barato do que ficar 8s parado
+            # sem fazer nada à espera que se resolva sozinho (foi isto que
+            # esgotou os 150s inteiros num caso real, ver diagnóstico desta
+            # conversa). MAX_ROLLS_RECUPERACAO (3) continua a limitar o
+            # número de tentativas, e executar_roll_recuperacao() já tem o
+            # seu próprio cooldown (2s) antes da leitura seguinte.
+            if passo["coords_bola"] is None:
+                if rolls_recuperacao < olho.MAX_ROLLS_RECUPERACAO:
+                    rolls_recuperacao += 1
+                    olho.executar_roll_recuperacao(rolls_recuperacao)
+                else:
+                    print(f"[AVISO] Bússola cega e já sem rolls de recuperação disponíveis ({olho.MAX_ROLLS_RECUPERACAO}/{olho.MAX_ROLLS_RECUPERACAO} usados) -- a continuar a ler na mesma.")
+
+            ainda_avisa = procurar_template(templates['align_warning'], "ALIGN WARNING (jogo)", MONITOR_CENTER, 0.82, debug=True, sct=sct)
+
+            if passo["alinhado_frame"] and not ainda_avisa:
+                rolls_recuperacao = 0  # leitura recuperada; futuras perdas tem direito a novos rolls
+                if tempo_confirmado_bussola is None:
+                    tempo_confirmado_bussola = time.time()
+                    print("[LOG] Bússola/HUD alinhados e sem aviso do jogo -- a validar estabilidade (3s)...")
+                elif time.time() - tempo_confirmado_bussola >= TEMPO_ESTABILIDADE:
+                    print("[OK] Confirmado por bússola/HUD, sem aviso do jogo, estável 3s seguidos.")
+                    logging.info("engatar_assist_e_alinhar: confirmado via bússola/HUD.")
+                    olho.fechar_debug_visual()
+                    return True
+            else:
+                tempo_confirmado_bussola = None
+
             time.sleep(0.2)
-    print(f"[AVISO] Alvo não centrou em {timeout}s -- a seguir na mesma, o Assist continua a corrigir sozinho.")
 
 # ==========================================
 # 5. FASE 2: VIAGEM E CHEGADA
 # ==========================================
-def aguardar_assist_no_hud():
-    """ Em vez de só esperar passivamente o icone ASSIST_ACTIVE estabilizar,
-    continua a corrigir o alinhamento (via olho.py) enquanto o HUD mostrar o
-    aviso de desalinhamento (templates['align_warning']) -- o Assist só
-    estabiliza sozinho depois de já estar minimamente apontado ao alvo.
-
-    O sinal de "alvo travado" é templates['assist_locked'] (as 'duas
-    triangulos azuis' que aparecem um pouco acima de onde estava o aviso de
-    desalinhamento) -- assim que aparece, PARA de corrigir. Mas travado !=
-    confirmado: enquanto isso, verifica a cada segundo (imagem + telemetria
-    em conjunto, não só o marcador de travado):
-      supercruise ligado + assist_active   -> alinhado, conta para os 3s
-      supercruise ligado + align_warning   -> ainda desalinhado apesar do
-                                               marcador -- retoma a correção
-                                               de imediato, não espera os 3s
-    Só confirma sucesso depois de 3 segundos SEGUIDOS com supercruise+
-    assist_active (a nave acelera e oscila muito mesmo depois do assist
-    ligar, por isso a exigência de estabilidade em vez da primeira deteção).
-
-    Usado ao ligar o assist pela primeira vez e outra vez depois de um plano
-    de fuga bem sucedido reengatar o assist a meio da viagem (ver
-    monitorar_viagem).
-
-    Devolve True quando a validação final confirma, ou a string
-    "chegada_curta" se a nave chegar ao destino (telemetria + Journal
-    confirmam) antes mesmo do alvo travar -- saltos curtos (estacao perto do
-    ponto de entrada em Supercruise) podem terminar em menos de 60s, e isso
-    NAO e uma falha (a nave chegou mesmo), so um falso alarme deste
-    watchdog. Confirmado em jogo real: chegada as ~35s depois de engatar o
-    assist, watchdog abortou aos 60s na mesma. """
-    nave_ativa = olho.obter_modelo_nave_atual()
-    MONITOR_CONFIG, CX_NEUTRO, CY_NEUTRO = olho.carregar_dados_calibracao(nave_ativa)
-
-    timeout_assist = time.time() + 60
-    travado_desde = None
-
-    with mss.mss() as sct:
-        try:
-            monitor_jogo = sct.monitors[1]
-        except Exception:
-            monitor_jogo = sct.monitors[0]
-        area_bussola = {
-            "top": monitor_jogo["top"] + MONITOR_CONFIG["top"],
-            "left": monitor_jogo["left"] + MONITOR_CONFIG["left"],
-            "width": MONITOR_CONFIG["width"], "height": MONITOR_CONFIG["height"]
-        }
-
-        while True:
-            if time.time() > timeout_assist:
-                abortar_com_erro("Timeout (60s). Supercruise Assist não travou no alvo (2 triângulos) no HUD.")
-
-            flags = ler_telemetria()
-            em_supercruise = bool(flags & STATUS_FLAGS["SUPERCRUISE"])
-            if not em_supercruise and confirmar_chegada_por_journal():
-                msg = "Chegada confirmada (telemetria+Journal) antes do alvo alguma vez travar -- salto curto de mais para este watchdog."
-                print(f"[OK] {msg}")
-                logging.info(f"aguardar_assist_no_hud: {msg}")
-                return "chegada_curta"
-
-            # Threshold 0.65 -- mais baixo que os outros templates deste
-            # ficheiro (0.75-0.82) de propósito, para tolerar a oscilação da
-            # nave logo após o assist ligar. Ainda por afinar com mais voos
-            # reais, como os outros valores "primeiro palpite" neste projeto.
-            travado_agora = procurar_template(templates['assist_locked'], "ASSIST LOCKED (2 triangulos)", MONITOR_CENTER, 0.65, debug=True)
-
-            if not travado_agora:
-                # Ainda não travou -- continua a corrigir enquanto o aviso
-                # de desalinhamento estiver visível (mesmo comportamento de
-                # antes de o marcador de travado alguma vez aparecer).
-                travado_desde = None
-                if procurar_template(templates['align_warning'], "ASSIST LIGADO MAS DESALINHADO", MONITOR_CENTER, 0.82):
-                    olho.executar_passo_alinhamento(sct, area_bussola, CX_NEUTRO, CY_NEUTRO)
-                    time.sleep(0.2)
-                else:
-                    time.sleep(1)
-                continue
-
-            # Travado (2 triângulos) -- parado de corrigir. Confirma tick a
-            # tick com imagem+telemetria em vez de assumir sucesso só pelo
-            # marcador de travado (ver docstring).
-            if em_supercruise and procurar_template(templates['assist_active'], "ASSIST ACTIVE", MONITOR_CENTER, 0.75, debug=True):
-                if travado_desde is None:
-                    travado_desde = time.time()
-                    print("[LOG] Em supercruise e alinhado -- a confirmar estabilidade (3s)...")
-                elif time.time() - travado_desde >= 3.0:
-                    print("[OK] Assist confirmado -- supercruise + alinhado, estável 3s seguidos.")
-                    return True
-            elif em_supercruise and procurar_template(templates['align_warning'], "ASSIST INACTIVE (desalinhado apesar do travado)", MONITOR_CENTER, 0.82, debug=True):
-                print("[LOG] Em supercruise mas ainda desalinhado -- a retomar correção (não espera os 3s).")
-                travado_desde = None
-                olho.executar_passo_alinhamento(sct, area_bussola, CX_NEUTRO, CY_NEUTRO)
-            # else: frame ambíguo (nem ACTIVE nem INACTIVE reconhecidos) --
-            # não reinicia a contagem, só não avança nem corrige.
-
-            time.sleep(1)
-
-def monitorar_viagem():
+def monitorar_viagem(resultado_assist, ancora_log=None):
     print("\n>>> FASE 2: Viagem em Supercruise...")
-    resultado_assist = aguardar_assist_no_hud()
 
     if resultado_assist == "chegada_curta":
         # Salto curto de mais para o watchdog do icone -- ja chegamos, avanca
@@ -792,29 +915,55 @@ def monitorar_viagem():
         timeout_viagem = time.time() + 1500 # 25 mins
 
         chegada_confirmada = False
+        confirmacoes_fora_supercruise = 0
         while not chegada_confirmada:
             if time.time() > timeout_viagem:
                 abortar_com_erro("Timeout (25 mins). Viagem em supercruise excedeu o limite seguro.")
 
             flags = ler_telemetria()
 
-            if not bool(flags & STATUS_FLAGS["SUPERCRUISE"]):
-                print("\n[LOG] Queda de Supercruise detetada pela telemetria. A verificar causa...")
-                if bool(flags & STATUS_FLAGS["INTERDICTION"]):
-                    print("[AVISO] Flag INTERDICTION estava ativa -- provável causa da queda.")
-                    logging.info("Queda de Supercruise com INTERDICTION ativa.")
+            if bool(flags & STATUS_FLAGS["SUPERCRUISE"]):
+                confirmacoes_fora_supercruise = 0
+                time.sleep(1)
+                continue
 
-                if confirmar_chegada_por_journal():
-                    chegada_confirmada = True
-                else:
-                    # plano_fuga.executar_fuga() ja confirma Supercruise
-                    # internamente antes de devolver (nao so FSD_CHARGING) --
-                    # aguardar_supercruise_confirmado() aqui seria redundante.
-                    plano_fuga.executar_fuga()
-                    print("[LOG] Plano de fuga concluído (Supercruise confirmado).")
-                    engatar_assist_e_alinhar()
-                    aguardar_assist_no_hud()
-                    timeout_viagem = time.time() + 1500  # nova janela de 25 min pos-fuga
+            # Fora de Supercruise pela telemetria -- exige 2 leituras
+            # seguidas (mesmo padrão de engatar_assist_e_alinhar) antes de
+            # reagir: uma leitura única pode ser só um glitch do Status.json
+            # a meio de reescrita, e reagir a isso aqui é bem mais caro
+            # (chama plano_fuga.executar_fuga() se o Journal não confirmar
+            # chegada) do que ali.
+            confirmacoes_fora_supercruise += 1
+            if confirmacoes_fora_supercruise < CONFIRMACOES_FORA_SUPERCRUISE:
+                time.sleep(1)
+                continue
+
+            # Veto barato antes de ir ao Journal ou acionar o plano de fuga:
+            # se 'ALIGN WITH TARGET DESTINATION' ainda estiver visível, o
+            # HUD de Supercruise ainda está ativo -- não pode ter havido
+            # queda real, a leitura da flag é que estava errada.
+            if procurar_template(templates['align_warning'], "ALIGN WARNING (veto de queda)", MONITOR_CENTER, 0.82, debug=True):
+                print("[AVISO] Telemetria sugere fora de Supercruise, mas 'ALIGN WITH TARGET DESTINATION' ainda visível -- provável glitch de leitura, a continuar a viagem.")
+                confirmacoes_fora_supercruise = 0
+                time.sleep(1)
+                continue
+
+            print("\n[LOG] Queda de Supercruise detetada pela telemetria (confirmada 2x seguidas). A verificar causa...")
+            if bool(flags & STATUS_FLAGS["INTERDICTION"]):
+                print("[AVISO] Flag INTERDICTION estava ativa -- provável causa da queda.")
+                logging.info("Queda de Supercruise com INTERDICTION ativa.")
+
+            if confirmar_chegada_por_journal(ancora_log=ancora_log):
+                chegada_confirmada = True
+            else:
+                # plano_fuga.executar_fuga() ja confirma Supercruise
+                # internamente antes de devolver (nao so FSD_CHARGING) --
+                # aguardar_supercruise_confirmado() aqui seria redundante.
+                plano_fuga.executar_fuga()
+                print("[LOG] Plano de fuga concluído (Supercruise confirmado).")
+                engatar_assist_e_alinhar(ancora_log=ancora_log)
+                timeout_viagem = time.time() + 1500  # nova janela de 25 min pos-fuga
+                confirmacoes_fora_supercruise = 0
 
             time.sleep(1)
 
@@ -855,10 +1004,17 @@ def executar():
     print("Alinha o nariz da nave com o destino. Iniciando em 1s...")
     time.sleep(1)
 
+    # Âncora no Journal (posição em bytes), capturada ANTES do salto --
+    # confirmar_chegada_por_journal() só vê eventos escritos depois deste
+    # ponto, para nunca confundir uma chegada desta perna com uma de uma
+    # perna anterior já concluída nesta mesma sessão de jogo (ver
+    # confirmar_chegada_por_journal e diagnóstico desta conversa).
+    ancora_log = obter_tamanho_atual_log()
+
     iniciar_salto_seguro()
     aguardar_supercruise_confirmado()
-    engatar_assist_e_alinhar()
-    monitorar_viagem()
+    resultado_assist = engatar_assist_e_alinhar(ancora_log=ancora_log)
+    monitorar_viagem(resultado_assist, ancora_log=ancora_log)
 
     if VISUAL_DEBUG:
         cv2.destroyAllWindows()
