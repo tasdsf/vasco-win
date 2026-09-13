@@ -43,11 +43,13 @@ load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
 
 
 def ligar_db():
-    """ Liga à BD partilhada usando as variáveis do .env (R2D2_DB_*). """
+    """ Liga à BD partilhada usando as variáveis do .env (R2D2_DB_*).
+        A password NÃO vem do .env — vem do pgpass.conf do Windows
+        (%APPDATA%\\postgresql\\pgpass.conf), lido automaticamente pelo
+        libpq quando psycopg2.connect() não recebe o argumento password. """
     host = os.environ.get("R2D2_DB_HOST")
-    password = os.environ.get("R2D2_DB_PASSWORD")
-    if not host or not password:
-        print("[CALIBRAR] .env incompleto: precisa de R2D2_DB_HOST e R2D2_DB_PASSWORD (ver .env.example).")
+    if not host:
+        print("[CALIBRAR] .env incompleto: precisa de R2D2_DB_HOST (ver .env.example).")
         return None
     try:
         return psycopg2.connect(
@@ -55,7 +57,6 @@ def ligar_db():
             port=os.environ.get("R2D2_DB_PORT", "5432"),
             dbname=os.environ.get("R2D2_DB_NAME", "ED"),
             user=os.environ.get("R2D2_DB_USER", "r2d2"),
-            password=password,
             connect_timeout=5,
         )
     except Exception as e:

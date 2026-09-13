@@ -137,7 +137,7 @@ def falar(texto):
 # ==========================================
 # 2. MOTOR DE VISÃO COMPUTACIONAL
 # ==========================================
-def procurar_template(template, nome_label, monitor, threshold=0.85):
+def procurar_template(template, nome_label, monitor, threshold=0.85, debug=False):
     if template is None: return False, 0.0
     
     with mss.mss() as sct:
@@ -163,7 +163,11 @@ def procurar_template(template, nome_label, monitor, threshold=0.85):
         _, max_val, _, max_loc = cv2.minMaxLoc(resultado)
         
         encontrou = max_val >= threshold
-        
+
+        if debug:
+            marca = "OK" if encontrou else "--"
+            print(f"    [MATCH {marca}] {nome_label}: {max_val:.3f} (limiar {threshold:.2f})")
+
         if VISUAL_DEBUG:
             cor = (0, 255, 0) if encontrou else (0, 0, 255)
             if encontrou:
@@ -364,8 +368,19 @@ def executar_auto_launch():
     # baixa o score; 0.65 dá margem para esse estado sem deixar de exigir
     # um match real.
     print("\nA validar estado do painel (NEED-REPAIR / no_ammo) antes de qualquer tecla...")
-    need_repair, _ = procurar_template(templates['need_repair'], "NEED_REPAIR", MONITOR_MENU, 0.70)
-    ammo_inativo, _ = procurar_template(templates['no_ammo'], "NO_AMMO (inativo = não precisa)", MONITOR_MENU, 0.65)
+    need_repair, _ = procurar_template(templates['need_repair'], "NEED_REPAIR", MONITOR_MENU, 0.70, debug=True)
+    ammo_inativo, _ = procurar_template(templates['no_ammo'], "NO_AMMO (inativo = não precisa)", MONITOR_MENU, 0.65, debug=True)
+    # Snapshot dedicado (nao sobrescrito pelas chamadas seguintes de
+    # procurar_template, ao contrario de log_test) -- sem isto, uma corrida
+    # bem sucedida nao deixava nenhuma evidencia visual de que
+    # NEED_REPAIR/NO_AMMO leram bem (ou mal) neste instante -- so se via em
+    # jogo real, tarde demais, com a nave ja a descolar sem reabastecer
+    # (ver diagnostico desta conversa). Best-effort, nunca pode travar o
+    # undocking.
+    try:
+        cv2.imwrite(os.path.join(pasta_logs, "undocking_reabastecimento.png"), cv2.imread(log_test))
+    except Exception as e:
+        print(f"[AVISO] Falha ao gravar snapshot de reabastecimento: {e}")
 
     print("\nA reabastecer combustível: 3x 'w' + space...")
     for _ in range(3):

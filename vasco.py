@@ -219,20 +219,6 @@ def main():
         state = load_state()
         current_step = state.get("last_step", -1) + 1
         completed_steps = state.get("completed_steps", [])
-        
-        # VALIDAR LOS PARA DESCOLAR SOMENTE SE VALER A PENA
-        # Etapas UNDOCKING (renumeradas apos remocao do OLHO da SEQUENCE).
-        if current_step in (3, 8):
-            espera = calcular_espera_los(ed_log_dir=ED_LOG_DIR)
-            if espera and espera > 0:
-                h, resto = divmod(int(espera), 3600)
-                m, s = divmod(resto, 60)
-                agora_utc_los = datetime.now(timezone.utc)
-                partida_utc = agora_utc_los + timedelta(seconds=espera)
-                partida_pt = partida_utc + timedelta(hours=1)
-                print(f"[LOS] Destino obscurecido pelo planeta.\n A aguardar {h}h {m}m {s}s... "
-                      f"Partida UTC {partida_utc.strftime('%H:%M:%S')} / PT {partida_pt.strftime('%H:%M:%S')}")
-                time.sleep(espera)
 
         # Verifica se o ciclo já terminou anteriormente para limpar o ficheiro
         # (SEQUENCE é indexado de 1 a len(SEQUENCE); só reinicia quando current_step
@@ -264,6 +250,29 @@ def main():
             step_info = SEQUENCE[current_step]
 
             if step_info["name"] == "UNDOCKING":
+                # VALIDAR LOS PARA DESCOLAR SOMENTE SE VALER A PENA -- tem de
+                # correr AQUI, dentro do loop que avança pelas etapas, não só
+                # uma vez à entrada do main(). Bug real confirmado: um
+                # arranque/retoma numa etapa diferente de UNDOCKING (ex.: 1
+                # ou 7) que progredisse naturalmente até UNDOCKING nunca via
+                # este gate, porque a verificação antiga só corria com o
+                # current_step de quando o processo tinha arrancado, não
+                # com o current_step atual do loop -- undocking do Zahir
+                # aconteceu sem esperar pelo LOS (ver diagnóstico desta
+                # conversa). Por nome em vez de número de etapa (3/8) -- não
+                # depende de a UNDOCKING continuar nestas posições exatas se
+                # a SEQUENCE for renumerada outra vez.
+                espera = calcular_espera_los(ed_log_dir=ED_LOG_DIR)
+                if espera and espera > 0:
+                    h, resto = divmod(int(espera), 3600)
+                    m, s = divmod(resto, 60)
+                    agora_utc_los = datetime.now(timezone.utc)
+                    partida_utc = agora_utc_los + timedelta(seconds=espera)
+                    partida_pt = partida_utc + timedelta(hours=1)
+                    print(f"[LOS] Destino obscurecido pelo planeta.\n A aguardar {h}h {m}m {s}s... "
+                          f"Partida UTC {partida_utc.strftime('%H:%M:%S')} / PT {partida_pt.strftime('%H:%M:%S')}")
+                    time.sleep(espera)
+
                 reiniciar_leg_limpa()
 
             print(f"[ETAPA {current_step}] {step_info['name']}: {step_info['desc']}")
@@ -309,11 +318,18 @@ def main():
                         success, _, _ = executar_script(step_info["script"])
                         if success:
                             print(f"[SUCESSO] Retry manual bem sucedido!")
+                            completed_steps.append(current_step)
+                            save_state(current_step, success=True, completed_steps=completed_steps)
+                            current_step += 1
                         else:
-                            print("[AVISO] Retry manual falhou, mas continuamos")
-                        completed_steps.append(current_step)
-                        save_state(current_step, success=True, completed_steps=completed_steps)
-                        current_step += 1
+                            # Corrigido: um retry manual falhado nao pode avancar o
+                            # estado como se tivesse tido sucesso -- isso desincroniza
+                            # o current_step da posicao real da nave em jogo (foi o
+                            # que causou o comprar.py a falhar docado no carrier em
+                            # vez da estacao). Sem avancar, o loop volta ao topo e
+                            # tenta a etapa outra vez, mostrando o menu de novo se
+                            # voltar a falhar.
+                            print("[AVISO] Retry manual falhou. Etapa nao avancada.")
                         
                     elif choice == "2":
                         print("Fallback manual. Abra (script).py manualmente.")

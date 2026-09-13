@@ -42,6 +42,8 @@ import os
 import glob
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
+
 PASSO_SIMULACAO        = 10     # segundos
 LIMITE_SIMULACAO_HORAS = 24
 
@@ -118,9 +120,15 @@ def _calibrar_fase_periodo(observacoes, cfg, raio_bloqueio,
     escolhe o período CENTRAL (mediana) — mais estável de corrida para
     corrida do que o argmax, que salta pelas bordas do planalto.
 
-    Inner loop otimizado: a posição da estação é pré-calculada uma vez (não
-    depende de período nem fase), e a rotação por fase usa a fórmula de
-    adição de ângulos (sem trigonometria dentro do laço mais interno).
+    Vetorizado com numpy e com a MESMA resolução de grelha do
+    Vasco-Nobara/Linux (500 pontos de período, via
+    int(round(1.0/passo_frac)) -- a fórmula anterior aqui,
+    int(round(2*var/passo_frac))+1, dava só 121 pontos para a mesma janela
+    de ±12%, ~4x mais grosseira. As duas versões empatavam no score do
+    histórico (61/69) mas escolhiam períodos/fases DIFERENTES dentro desse
+    empate, e um deles extrapolava errado para o momento atual -- confirmado
+    em jogo real: o Linux previa bloqueio, esta versão previa livre, e a
+    linha de visão estava mesmo bloqueada (ver diagnóstico desta conversa).
     """
     parsed, ts = [], []
     for o in observacoes:
@@ -151,60 +159,75 @@ def _calibrar_fase_periodo(observacoes, cfg, raio_bloqueio,
     raio2 = raio_bloqueio * raio_bloqueio
     n = len(parsed)
 
-    dt = [(t - epoch).total_seconds() for (t, _) in parsed]
-    vis = [v for (_, v) in parsed]
+    dts = np.array([(t - epoch).total_seconds() for (t, _) in parsed])
+    reais = np.array([v for (_, v) in parsed], dtype=bool)
 
     # Posição da estação em cada observação (independente de T e fase)
     w_est = 2.0 * math.pi / T_est
-    ex = [a_est * math.cos((w_est * d) % (2 * math.pi)) for d in dt]
-    ey = [a_est * math.sin((w_est * d) % (2 * math.pi)) for d in dt]
+    est_x = a_est * np.cos(w_est * dts)
+    est_y = a_est * np.sin(w_est * dts)
 
-    # Tabela de cos/sin da fase (calculada uma vez)
-    fcos = [math.cos(2 * math.pi * i / passos_fase) for i in range(passos_fase)]
-    fsin = [math.sin(2 * math.pi * i / passos_fase) for i in range(passos_fase)]
+    fases = np.linspace(0.0, 2 * math.pi, passos_fase, endpoint=False)
+    cos_fase = np.cos(fases)
+    sin_fase = np.sin(fases)
 
-    resultados = []  # (score, T, fase)
-    n_passos = int(round(2 * var / passo_frac)) + 1
-    for k in range(n_passos):
-        frac = -var + passo_frac * k
-        T = T0 * (1.0 + frac)
-        w = 2.0 * math.pi / T
-        # Ângulo base do carrier (fase 0) em cada observação, já escalado por a_car
-        ccos = [a_car * math.cos((w * d) % (2 * math.pi)) for d in dt]
-        csin = [a_car * math.sin((w * d) % (2 * math.pi)) for d in dt]
+    def _acertos_por_fase(periodo):
+        """ Score (N observações corretas) para cada uma das passos_fase
+        fases candidatas, com este período fixo -- vetorizado. """
+        ang_base = (2 * math.pi / periodo) * dts
+        cos_base = np.cos(ang_base)
+        sin_base = np.sin(ang_base)
 
-        melhor_s, melhor_f = -1, 0.0
-        for i in range(passos_fase):
-            cf = fcos[i]; sf = fsin[i]
-            s = 0
-            for j in range(n):
-                # Carrier: roda o ângulo base pela fase (adição de ângulos)
-                cx = ccos[j] * cf - csin[j] * sf
-                cy = csin[j] * cf + ccos[j] * sf
-                # tem_los inline (raio-esfera, planeta na origem)
-                dx = cx - ex[j]; dy = cy - ey[j]
-                ddd = dx * dx + dy * dy
-                if ddd == 0.0:
-                    livre = True
-                else:
-                    tt = (-ex[j] * dx - ey[j] * dy) / ddd
-                    if tt < 0.0 or tt > 1.0:
-                        livre = True
-                    else:
-                        px = ex[j] + dx * tt; py = ey[j] + dy * tt
-                        livre = (px * px + py * py) > raio2
-                if livre == vis[j]:
-                    s += 1
-            if s > melhor_s:
-                melhor_s, melhor_f = s, 2 * math.pi * i / passos_fase
-        resultados.append((melhor_s, T, melhor_f))
+        # Adição de ângulos: roda o ângulo-base pela fase candidata sem
+        # recalcular cos/sin do ângulo somado a cada combinação.
+        cos_car = cos_base[:, None] * cos_fase[None, :] - sin_base[:, None] * sin_fase[None, :]
+        sin_car = sin_base[:, None] * cos_fase[None, :] + cos_base[:, None] * sin_fase[None, :]
 
-    best = max(r[0] for r in resultados)
-    planalto = sorted(((T, f) for (s, T, f) in resultados if s == best), key=lambda x: x[0])
-    Ts = [T for (T, f) in planalto]
-    T_med = Ts[len(Ts) // 2]
-    fase_med = next(f for (T, f) in planalto if T == T_med)
-    return epoch, 0.0, fase_med, T_med, best, n, (Ts[0], Ts[-1])
+        car_x = a_car * cos_car
+        car_y = a_car * sin_car
+
+        dx = car_x - est_x[:, None]
+        dy = car_y - est_y[:, None]
+        ddd = dx * dx + dy * dy
+        o_dot_d = (-est_x[:, None]) * dx + (-est_y[:, None]) * dy
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t_param = np.where(ddd > 0, o_dot_d / ddd, 0.0)
+
+        px = est_x[:, None] + dx * t_param
+        py = est_y[:, None] + dy * t_param
+        mag2 = px * px + py * py
+
+        visivel_previsto = (ddd == 0) | (t_param < 0) | (t_param > 1) | (mag2 > raio2)
+        return (visivel_previsto == reais[:, None]).sum(axis=0)   # (F,)
+
+    n_passos_periodo = int(round(1.0 / passo_frac))
+    periodos = np.linspace(T0 * (1 - var), T0 * (1 + var), n_passos_periodo)
+
+    melhor_score_global = -1
+    periodos_no_topo = []
+    for periodo in periodos:
+        acertos = _acertos_por_fase(periodo)
+        score = int(acertos.max())
+        if score > melhor_score_global:
+            melhor_score_global = score
+            periodos_no_topo = [float(periodo)]
+        elif score == melhor_score_global:
+            periodos_no_topo.append(float(periodo))
+
+    # Escolhe o período CENTRAL (mediana) de entre os empatados no melhor
+    # score -- o argmax salta pelas bordas do planalto e é instável de
+    # corrida para corrida; a mediana do planalto é estável.
+    periodos_no_topo.sort()
+    T_med = periodos_no_topo[len(periodos_no_topo) // 2]
+
+    # Recalcula a fase ótima especificamente para o período mediano
+    # escolhido (o planalto pode não ser perfeitamente plano em fase).
+    acertos_final = _acertos_por_fase(T_med)
+    idx_melhor = int(np.argmax(acertos_final))
+    fase_med = float(fases[idx_melhor])
+    melhor_score = int(acertos_final[idx_melhor])
+
+    return epoch, 0.0, fase_med, T_med, melhor_score, n, (periodos_no_topo[0], periodos_no_topo[-1])
 
 
 # ==========================================
@@ -251,10 +274,12 @@ def _obter_observacoes_db(script_dir, sistema):
     except ImportError:
         return None
 
+    # A password NÃO vem do .env — vem do pgpass.conf do Windows
+    # (%APPDATA%\postgresql\pgpass.conf), lido automaticamente pelo libpq
+    # quando psycopg2.connect() não recebe o argumento password.
     load_dotenv(os.path.join(script_dir, ".env"))
     host = os.environ.get("R2D2_DB_HOST")
-    password = os.environ.get("R2D2_DB_PASSWORD")
-    if not host or not password:
+    if not host:
         return None
 
     try:
@@ -263,7 +288,6 @@ def _obter_observacoes_db(script_dir, sistema):
             port=os.environ.get("R2D2_DB_PORT", "5432"),
             dbname=os.environ.get("R2D2_DB_NAME", "ED"),
             user=os.environ.get("R2D2_DB_USER", "r2d2"),
-            password=password,
             connect_timeout=4,
         )
     except Exception as e:

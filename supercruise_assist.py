@@ -69,6 +69,52 @@ def abortar_com_erro(mensagem):
     _capturar_screenshot_erro()
     sys.exit(1)
 
+# ==========================================
+# 0b. DIAGNÓSTICO PASSO-A-PASSO (engatar_assistencia_menu)
+# ==========================================
+# Pasta por sessão (uma subpasta por chamada a engatar_assistencia_menu()),
+# nomeada pelo timestamp -- screenshot numerado a CADA passo, desde o '1'
+# que abre o painel até à confirmação final do Assist. Ao contrário de
+# erro_*.png (só o instante do abort), isto dá o trajeto visual completo,
+# incluindo os passos que correram bem -- essencial quando o mesmo "Assist
+# não ativou" volta a falhar depois de várias correções já aplicadas e já
+# não há teoria óbvia por testar (ver diagnóstico desta conversa). Estado
+# em globals (mesmo padrão de _janela_debug_iniciada em olho.py) -- só uma
+# sessão de diagnóstico ativa de cada vez, não precisa de mais que isso.
+DIAG_ASSIST_DIR = os.path.join(LOGS_DIR, "diag_assist")
+_diag_dir = None
+_diag_contador = 0
+
+def _diag_iniciar_sessao():
+    """ Abre uma nova subpasta de diagnóstico para esta chamada de
+    engatar_assistencia_menu() -- chamar uma vez no início da função. """
+    global _diag_dir, _diag_contador
+    _diag_dir = os.path.join(DIAG_ASSIST_DIR, time.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(_diag_dir, exist_ok=True)
+    _diag_contador = 0
+    print(f"[DIAG] Sessão de diagnóstico: {_diag_dir}")
+
+def _diag_passo(nome):
+    """ Grava o ecrã inteiro do jogo, numerado e nomeado, dentro da sessão
+    de diagnóstico atual. Best-effort -- nunca pode travar o fluxo
+    principal nem impedir o abort em curso. """
+    global _diag_contador
+    if _diag_dir is None:
+        return
+    try:
+        _diag_contador += 1
+        caminho = os.path.join(_diag_dir, f"{_diag_contador:02d}_{nome}.png")
+        with mss.mss() as sct:
+            try:
+                monitor_jogo = sct.monitors[1]
+            except Exception:
+                monitor_jogo = sct.monitors[0]
+            img_bgra = np.array(sct.grab(monitor_jogo))
+            cv2.imwrite(caminho, cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR))
+        print(f"[DIAG] {_diag_contador:02d} {nome} -> {caminho}")
+    except Exception as e:
+        print(f"[AVISO] Falha ao gravar diagnóstico '{nome}': {e}")
+
 # Voz
 engine = pyttsx3.init()
 def falar(texto):
@@ -122,7 +168,14 @@ def focar_jogo_seguro():
 # 1. SETUP (TEMPLATES E TELEMETRIA)
 # ==========================================
 MONITOR_CENTER = {"top": 100, "left": 400, "width": 1100, "height": 800}
-MONITOR_PANEL = {"top": 200, "left": 50, "width": 1000, "height": 1200}
+MONITOR_PANEL = {"top": 200, "left": 50, "width": 1150, "height": 1200}
+# width 1000 -> 1150: recorte antigo cortava o "> " final de linhas longas
+# ("< FUTEN SPACEPORT >" acaba em x=1073, fora dos x=1050 do recorte de
+# 1000px), fazendo o template *_selected falhar por falta do fecho do
+# template mesmo com a linha visivelmente destacada em jogo (match caía de
+# 0.853 no ecrã completo para 0.789 no recorte, abaixo do limiar 0.80).
+# "ZAHIR W6G-26N" é curto e sempre coube nos 1000px, por isso só afetava
+# Futen. 1150 dá margem folgada acima dos 1073px necessários.
 STATUS_FILE = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Frontier Developments', 'Elite Dangerous', 'Status.json')
 ED_LOG_DIR = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Frontier Developments', 'Elite Dangerous')
 
@@ -159,6 +212,33 @@ TEMPLATES_NOMES = {
     # -- usados em engatar_assistencia_menu() para confirmar o alvo certo.
     'zahir_confirm': 'zahir_target_confirm.png',
     'futen_confirm': 'futen_target_confirm.png',
+    # Nome do alvo destacado NA LISTA, entre '< >' (ex.: "< ZAHIR W6G-26N >")
+    # -- confirma que a linha certa está mesmo selecionada ANTES de premir
+    # 'space' para abrir o popup de confirmação. Padrão adotado depois de
+    # "painel de confirmação do alvo não apareceu" continuar a falhar
+    # mesmo com mais tempo de espera pelo popup (ver diagnóstico desta
+    # conversa) -- apanha o problema mais cedo, antes de gastar uma
+    # tentativa inteira à espera de um popup que nunca ia abrir com a
+    # linha errada (ou nenhuma) selecionada.
+    'zahir_selected': 'carrier_selected.png',
+    'futen_selected': 'futen_selected.png',
+    # Ícone '<>' do botão lock/unlock, recortado só ao ícone (sem o texto
+    # "LOCK DESTINATION"/"UNLOCK DESTINATION" ao lado, que muda consoante o
+    # destino já estar trancado ou não -- confirmado em jogo real que tanto
+    # faz qual dos dois estados, a posição do ícone é igual). Usado duas
+    # vezes: (a) para confirmar que o popup abriu com o foco no botão certo,
+    # (b) para confirmar, depois do 'D', que o foco realmente saiu daqui --
+    # foi a falta desta segunda confirmação que causou "Assist não ativou"
+    # em jogo real: o 'D' às vezes não movia o foco, e o 'space' seguinte
+    # ia parar a ESTE botão (fazia lock/unlock) em vez do Supercruise
+    # Assist (ver diagnóstico desta conversa, screenshots 'apos_d').
+    'lock_unlock_toggle': 'lock_unlock_togle_button.png',
+    # Botão "SUPERCRUISE ASSIST" em foco (destacado a amarelo) -- usado para
+    # confirmar POSITIVAMENTE que o 'D' moveu o foco para o sítio certo, em
+    # vez de só confirmar a ausência do botão lock/unlock anterior (uma
+    # confirmação negativa não garante que o foco foi parar ao botão certo,
+    # só que saiu do errado).
+    'assist_toggle': 'assist_togle_button.png',
 }
 
 templates = {}
@@ -356,8 +436,7 @@ def registar_los_visivel_auto():
 
         load_dotenv(os.path.join(PROJECT_DIR, ".env"))
         host = os.environ.get("R2D2_DB_HOST")
-        password = os.environ.get("R2D2_DB_PASSWORD")
-        if not host or not password:
+        if not host:
             return  # .env não configurado nesta máquina — segue sem registar
 
         ed_log_dir = os.path.join(os.environ['USERPROFILE'], 'Saved Games',
@@ -367,12 +446,14 @@ def registar_los_visivel_auto():
             print("[LOS-AUTO] Sistema desconhecido — observação não registada.")
             return
 
+        # A password NÃO vem do .env — vem do pgpass.conf do Windows
+        # (%APPDATA%\postgresql\pgpass.conf), lido automaticamente pelo
+        # libpq quando psycopg2.connect() não recebe o argumento password.
         conn = psycopg2.connect(
             host=host,
             port=os.environ.get("R2D2_DB_PORT", "5432"),
             dbname=os.environ.get("R2D2_DB_NAME", "ED"),
             user=os.environ.get("R2D2_DB_USER", "r2d2"),
-            password=password,
             connect_timeout=4,
         )
         try:
@@ -575,11 +656,21 @@ def engatar_assistencia_menu():
     destino_nome = (destino.get("Name") if destino else None) or ""
     if "ZAHIR" in destino_nome.upper():
         template_alvo, nome_alvo = templates['zahir_confirm'], "ZAHIR"
+        template_selecionado = templates['zahir_selected']
     elif "FUTEN" in destino_nome.upper():
         template_alvo, nome_alvo = templates['futen_confirm'], "FUTEN SPACEPORT"
+        template_selecionado = templates['futen_selected']
     else:
         template_alvo, nome_alvo = None, None
+        template_selecionado = None
         print(f"[AVISO] Destino '{destino_nome}' não reconhecido (nem Zahir nem Futen) -- validação de alvo desativada nesta fase.")
+
+    # Sessão de diagnóstico (logs/diag_assist/<timestamp>/) -- passos 1
+    # (abrir painel/NAV TAB) e a fase de seleção na lista já confirmados
+    # fiáveis em jogo real (ver diagnóstico desta conversa); o registo
+    # passo-a-passo só começa a partir do popup de confirmação, que é onde
+    # a falha real acontecia.
+    _diag_iniciar_sessao()
 
     # 1. Abrir o painel e confirmar a aba NAVIGATION -- 3 tentativas; dentro
     # de cada uma, cicla com 'q' à procura da aba (o painel pode não abrir
@@ -603,46 +694,91 @@ def engatar_assistencia_menu():
     if not nav_found:
         pydirectinput.press('x')
         fechar_painel_se_aberto()
+        _diag_passo("FALHA_nav_tab")
+        print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
         logging.error("engatar_assistencia_menu: aba NAVIGATION não apareceu após 3 tentativas.")
         abortar_com_erro("Falha crítica: aba NAVIGATION não apareceu após 3 tentativas.")
 
     # 2. Selecionar o destino pré-selecionado (Space) e validar visualmente
-    # que é mesmo o alvo esperado -- 3 tentativas, recuperação por Backspace.
-    # Antes de cada 'space', reconfirma que a aba NAVIGATION ainda está
-    # visível -- o Backspace da tentativa anterior pode ter fechado o painel
-    # por completo em vez de só recuar um nível dentro dele, e mandar
-    # 'space' às cegas sem painel nenhum aberto não faz sentido.
+    # que é mesmo o alvo esperado -- duas fases com orçamentos de retry
+    # PRÓPRIOS (ver diagnóstico desta conversa, screenshots em
+    # logs/diag_assist/):
+    #   Fase A (lista): confirma a linha certa destacada ('< NOME >') antes
+    #     de premir 'space'. Até 3 falhas -- à 3ª, 1x Backspace e aborta.
+    #   Fase B (popup): confirma o TÍTULO do popup (nome certo) E o ÍCONE
+    #     do botão lock/unlock em foco (confirma que abriu no sítio certo,
+    #     independente de estar em estado LOCK ou UNLOCK -- confirmado em
+    #     jogo real que tanto faz qual dos dois para o passo seguinte). Se
+    #     qualquer um dos dois falhar, volta à Fase A (1x Backspace) --
+    #     orçamento próprio, até 5 falhas -- à 5ª, 2x Backspace e aborta.
+    falhas_lista = 0
+    falhas_popup = 0
+    MAX_FALHAS_LISTA = 3
+    MAX_FALHAS_POPUP = 5
     alvo_confirmado = (template_alvo is None)  # sem template conhecido -> nao bloqueia, so nao valida
-    for tentativa in range(1, 4):
+
+    while not alvo_confirmado:
+        time.sleep(1)
         if not procurar_template(templates['nav_tab'], "NAV TAB (antes do space, painel ainda aberto?)", MONITOR_PANEL, 0.80, debug=True):
             print("[AVISO] Painel não está visível antes do 'space' -- a reabrir e renavegar para NAVIGATION.")
             pydirectinput.press('1')
             time.sleep(1.2)
             confirmar_aba_navigation()
 
+        # Fase A: confirma que a linha certa está mesmo destacada na lista
+        # (nome entre '< >', ex.: "< ZAHIR W6G-26N >") ANTES de premir
+        # 'space' -- ver comentário nos templates *_selected em
+        # TEMPLATES_NOMES. 1s de assentamento antes de ler -- a lista podia
+        # ainda estar a assentar do passo anterior (reabertura do painel ou
+        # Backspace da tentativa anterior).
+        if template_selecionado is not None:
+            time.sleep(1.5)
+            linha_selecionada = procurar_template(template_selecionado, f"{nome_alvo} SELECIONADO NA LISTA", MONITOR_PANEL, 0.80, debug=True)
+            if not linha_selecionada:
+                falhas_lista += 1
+                if falhas_lista >= MAX_FALHAS_LISTA:
+                    fechar_painel_se_aberto()
+                    _diag_passo("FALHA_selecionado_lista")
+                    print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
+                    logging.error(f"engatar_assistencia_menu: linha '{nome_alvo}' nunca ficou destacada na lista após {MAX_FALHAS_LISTA} falhas.")
+                    abortar_com_erro(f"Falha crítica: linha '{nome_alvo}' nunca ficou destacada na lista após {MAX_FALHAS_LISTA} falhas.")
+                print(f"[AVISO] Linha '{nome_alvo}' não está destacada na lista (falha {falhas_lista}/{MAX_FALHAS_LISTA}) -- Backspace x2 e nova tentativa.")
+                pydirectinput.press('backspace')
+                time.sleep(0.3)
+                pydirectinput.press('backspace')
+                time.sleep(0.5)
+                continue
+
         print(">>> Focando no destino pré-selecionado (Space)...")
         pydirectinput.press('space')
-        time.sleep(0.8)
+        time.sleep(1.5)
 
         if template_alvo is None:
             alvo_confirmado = True
             break
-        if procurar_template(template_alvo, f"CONFIRM {nome_alvo}", MONITOR_PANEL, 0.80, debug=True):
-            print(f"[OK] Alvo confirmado: {nome_alvo}.")
+
+        # Fase B: título do popup + ícone do botão lock/unlock em foco.
+        _diag_passo(f"confirm_popup_falhas_lista{falhas_lista}_popup{falhas_popup}")
+        titulo_ok = procurar_template(template_alvo, f"CONFIRM {nome_alvo}", MONITOR_PANEL, 0.80, debug=True)
+        toggle_ok = procurar_template(templates['lock_unlock_toggle'], "LOCK/UNLOCK TOGGLE (popup)", MONITOR_PANEL, 0.80, debug=True)
+
+        if titulo_ok and toggle_ok:
+            print(f"[OK] Alvo confirmado: {nome_alvo} (título + botão lock/unlock em foco).")
             alvo_confirmado = True
             break
 
-        print(f"[AVISO] Painel de confirmação do alvo '{nome_alvo}' não apareceu (tentativa {tentativa}/3) -- Backspace x2 e nova tentativa.")
-        pydirectinput.press('backspace')
-        time.sleep(0.3)
+        falhas_popup += 1
+        if falhas_popup >= MAX_FALHAS_POPUP:
+            pydirectinput.press('x')
+            fechar_painel_se_aberto()
+            _diag_passo("FALHA_confirmacao_popup")
+            print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
+            logging.error(f"engatar_assistencia_menu: popup de '{nome_alvo}' (título={titulo_ok}, botão={toggle_ok}) não confirmou após {MAX_FALHAS_POPUP} falhas.")
+            abortar_com_erro(f"Falha crítica: popup de confirmação do alvo '{nome_alvo}' não validou (título ou botão) após {MAX_FALHAS_POPUP} falhas.")
+
+        print(f"[AVISO] Popup de '{nome_alvo}' não validou (título={titulo_ok}, botão={toggle_ok}) -- falha {falhas_popup}/{MAX_FALHAS_POPUP}, a voltar à lista.")
         pydirectinput.press('backspace')
         time.sleep(0.5)
-
-    if not alvo_confirmado:
-        pydirectinput.press('x')
-        fechar_painel_se_aberto()
-        logging.error(f"engatar_assistencia_menu: painel de confirmação do alvo '{nome_alvo}' não apareceu após 3 tentativas.")
-        abortar_com_erro(f"Falha crítica: painel de confirmação do alvo '{nome_alvo}' não apareceu após 3 tentativas.")
 
     # 3. Selecionar o Supercruise Assist (D -> Space). Chega-se aqui sempre
     # com o Assist desligado -- o early return de assist_ja_ativo() no topo
@@ -650,13 +786,41 @@ def engatar_assistencia_menu():
     # toggle: enviá-lo com o assist já ligado desliga-o em vez de o ligar --
     # foi isto que desligou o assist com o alvo já trancado num caso real,
     # ver diagnóstico desta conversa).
-    print(">>> Movendo para o botão Supercruise Assist (D)...")
-    pydirectinput.press('d')
-    time.sleep(0.5)
+    #
+    # 'D' às vezes não move o foco (confirmado em jogo real: screenshot
+    # 'apos_d' idêntico ao anterior, ainda no botão lock/unlock, "space"
+    # seguinte ia fazer lock/unlock em vez de ativar o Assist -- ver
+    # diagnóstico desta conversa). Confirma POSITIVAMENTE que o foco chegou
+    # ao botão "SUPERCRUISE ASSIST" (assist_toggle em foco) -- mais forte
+    # que só confirmar a ausência do botão lock/unlock, que não garante que
+    # o foco foi mesmo parar ao sítio certo (só que saiu do errado). Até 2
+    # tentativas de 'D', senão aborta.
+    MAX_TENTATIVAS_D = 2
+    foco_moveu = False
+    for tentativa_d in range(1, MAX_TENTATIVAS_D + 1):
+        print(f">>> Movendo para o botão Supercruise Assist (D), tentativa {tentativa_d}/{MAX_TENTATIVAS_D}...")
+        pydirectinput.press('d')
+        time.sleep(1.5)
+        _diag_passo(f"apos_d_tentativa{tentativa_d}")
+        foco_moveu = procurar_template(templates['assist_toggle'], "SUPERCRUISE ASSIST TOGGLE (apos D, deve estar em foco)", MONITOR_PANEL, 0.80, debug=True)
+        if foco_moveu:
+            break
+        print(f"[AVISO] 'D' não moveu o foco para o Supercruise Assist (tentativa {tentativa_d}/{MAX_TENTATIVAS_D}).")
+
+    if not foco_moveu:
+        pydirectinput.press('backspace')
+        time.sleep(0.3)
+        pydirectinput.press('backspace')
+        time.sleep(0.5)
+        _diag_passo("FALHA_d_nao_moveu_foco")
+        print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
+        logging.error(f"engatar_assistencia_menu: 'D' não moveu o foco para o Supercruise Assist após {MAX_TENTATIVAS_D} tentativas.")
+        abortar_com_erro(f"Falha crítica: 'D' não moveu o foco para o Supercruise Assist após {MAX_TENTATIVAS_D} tentativas.")
 
     print(">>> Ativando Assistência (Space)...")
     pydirectinput.press('space')
     time.sleep(1.0)
+    _diag_passo("apos_dspace")
 
     # Fecha o painel -- Backspace (UI Back) em vez de '1', que também é um
     # toggle e podia reabrir o painel em vez de o fechar se o estado do menu
@@ -680,17 +844,23 @@ def engatar_assistencia_menu():
     # de erro seguidos, todos com o cockpit limpo e o painel genuinamente
     # fechado). Por isso esta verificação volta a ser só sobre o painel.
     painel_fechado = False
-    for _ in range(3):
+    for i in range(1, 4):
         pydirectinput.press('backspace')
         time.sleep(0.3)
         pydirectinput.press('backspace')
-        time.sleep(0.5)
-        if not procurar_template(templates['nav_tab'], "NAV TAB (a confirmar fecho do painel)", MONITOR_PANEL, 0.80, debug=True):
-            painel_fechado = True
+        # 1.0s (era 0.5s) -- visto falhar em jogo real: o segundo Backspace
+        # ainda não tinha assentado quando o NAV TAB foi verificado, dando
+        # um falso "ainda aberto" (ver diagnóstico desta conversa).
+        time.sleep(1.0)
+        painel_fechado = not procurar_template(templates['nav_tab'], "NAV TAB (a confirmar fecho do painel)", MONITOR_PANEL, 0.80, debug=True)
+        _diag_passo(f"fecho_painel_tentativa{i}_{'ok' if painel_fechado else 'falhou'}")
+        if painel_fechado:
             break
 
     if not painel_fechado:
         fechar_painel_se_aberto()
+        _diag_passo("FALHA_fecho_painel")
+        print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
         logging.error("engatar_assistencia_menu: painel não fechou após 3 tentativas de Backspace.")
         abortar_com_erro("Falha crítica: painel não fechou após ativar o Supercruise Assist -- a parar antes de mandar teclas de alinhamento para um menu ainda aberto.")
 
@@ -706,13 +876,15 @@ def engatar_assistencia_menu():
     # margem (até 2s) em vez de uma leitura única -- o banner pode demorar
     # um instante a aparecer mesmo com o toggle já aplicado.
     assist_confirmado = False
-    for _ in range(4):
-        if assist_ja_ativo():
-            assist_confirmado = True
+    for i in range(1, 5):
+        assist_confirmado = assist_ja_ativo()
+        _diag_passo(f"confirmar_assist_tentativa{i}_{'ok' if assist_confirmado else 'falhou'}")
+        if assist_confirmado:
             break
         time.sleep(0.5)
 
     if not assist_confirmado:
+        print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
         logging.error("engatar_assistencia_menu: painel fechou mas Supercruise Assist não mostrou nenhum sinal de estar ativo (nem ASSIST_ACTIVE nem align_warning) após D+Space.")
         abortar_com_erro("Falha crítica: Supercruise Assist não ativou -- painel fechou normalmente mas D+Space não teve o efeito esperado no HUD.")
 

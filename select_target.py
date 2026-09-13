@@ -116,7 +116,11 @@ def focar_jogo_seguro():
 # ==========================================
 # 1. SETUP E ÁREAS
 # ==========================================
-MONITOR_PANEL = {"top": 200, "left": 50, "width": 1000, "height": 1200}
+MONITOR_PANEL = {"top": 200, "left": 50, "width": 1150, "height": 1200}
+# width 1000 -> 1150: mesma correção do supercruise_assist.py -- o recorte
+# de 1000px cortava o "> " final de "< FUTEN SPACEPORT >" (termina em
+# x=1073), fazendo os templates *_selected falharem por falta do fecho do
+# template mesmo com a linha destacada em jogo.
 LOG_DIR = os.path.expanduser('~') + r"\Saved Games\Frontier Developments\Elite Dangerous"
 
 pasta_imagens = os.path.join(diretorio_atual, 'images')
@@ -124,12 +128,27 @@ pasta_imagens = os.path.join(diretorio_atual, 'images')
 templates_nomes = {
     'nav_tab': 'NAVIGATION_SELECTED.png',
     'carrier': 'FLEET_CARRIER_NAME.png',
+    # O ícone do Zahir na lista tem duas aparências reais bem diferentes
+    # consoante a linha está ou não em destaque (faixa amarela do cursor):
+    # sem destaque é um ícone mais escuro/avermelhado, com destaque fica
+    # tingido de amarelo -- um único template não bate bem nos dois casos
+    # (testado ao vivo: cada um sozinho falha no estado do outro, ~0.13-0.67
+    # contra o limiar de 0.85). Mesma lógica já usada para 'station'/'station2'.
+    'carrier2': 'FLEET_CARRIER_NAME2.png',
     'station': 'STATION.png',
     'station2': 'STATION1.png',
     'locked': 'LOCKED_DESTINATION.png',
     'unlocked': 'UNLOCKED_DESTINATION.png',
     'zahir_confirm': 'zahir_target_confirm.png',
-    'futen_confirm': 'futen_target_confirm.png'
+    'futen_confirm': 'futen_target_confirm.png',
+    # Nome do alvo destacado NA LISTA, entre '< >' (ex.: "< ZAHIR W6G-26N >")
+    # -- mesmos ficheiros já usados em supercruise_assist.py. Aqui servem só
+    # de diagnóstico (ver marcar_destino_dinamico): confirma se a linha
+    # continua selecionada depois do lock, para perceber se é este o estado
+    # que mais tarde faz o engatar_assistencia_menu() do supercruise_assist
+    # falhar a encontrar a linha certa.
+    'zahir_selected': 'carrier_selected.png',
+    'futen_selected': 'futen_selected.png',
 }
 
 templates = {}
@@ -273,7 +292,8 @@ def procurar_alvo_dinamico(tipo_alvo, monitor, threshold, debug=False):
     if tipo_alvo == "station":
         return (procurar_template(templates['station'], "STATION", monitor, threshold, debug=debug) or
                 procurar_template(templates['station2'], "STATION v2", monitor, LIMIAR_STATION1, debug=debug))
-    return procurar_template(templates['carrier'], "CARRIER", monitor, threshold, debug=debug)
+    return (procurar_template(templates['carrier'], "CARRIER", monitor, threshold, debug=debug) or
+            procurar_template(templates['carrier2'], "CARRIER v2", monitor, threshold, debug=debug))
 
 # ==========================================
 # 4. LÓGICA DE MARCAÇÃO INTELIGENTE
@@ -389,7 +409,23 @@ def marcar_destino_dinamico():
         # vez que acontecer.
         _capturar_screenshot_erro()
         pydirectinput.press('space')
-        
+
+    # Diagnóstico (não bloqueia): confirma se a linha do alvo continua
+    # destacada na lista ('< NOME >') depois do lock -- o destino já está
+    # confirmado trancado pelos dois sinais acima (popup CONFIRM + LOCKED/
+    # UNLOCKED), por isso uma falha aqui não é motivo para reagir (arriscar
+    # mexer na seleção depois de um lock já bem-sucedido é pior que não
+    # fazer nada); só regista e grava screenshot, para perceber se é este o
+    # estado que mais tarde faz o engatar_assistencia_menu() do
+    # supercruise_assist.py falhar a encontrar a linha certa.
+    template_selecionado = templates.get('zahir_selected') if tipo_alvo == "carrier" else templates.get('futen_selected')
+    if template_selecionado is not None:
+        if procurar_template(template_selecionado, f"{nome_confirm} SELECIONADO NA LISTA (pós-lock)", MONITOR_PANEL, 0.80, debug=True):
+            print(f"[OK] Linha '{nome_confirm}' continua destacada na lista após o lock.")
+        else:
+            print(f"[AVISO] Linha '{nome_confirm}' já não está destacada na lista após o lock -- diagnóstico, não bloqueia.")
+            _capturar_screenshot_erro()
+
     pydirectinput.press('1') # Fecha o painel
     time.sleep(1.0)
     return True
