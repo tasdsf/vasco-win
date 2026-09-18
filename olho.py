@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import time
 import logging
 import cv2
@@ -128,10 +129,14 @@ def inicializar_infraestrutura():
 pydirectinput.PAUSE = 0.01
 BOT_ATIVO = True
 
-DEAD_ZONE_BUSSOLA = 2
+DEAD_ZONE_BUSSOLA = 1  # reduzido de 2 -- mesma calibração já validada no Vasco-Nobara/Linux ("2px era largo demais para o crop")
 RAIO_AJUSTE_FINO = 12
 IMPULSO_BUSSOLA = 0.2
-IMPULSO_BUSSOLA_GIGANTE = 8 * IMPULSO_BUSSOLA  # ALVO_ATRAS precisa de guinada grande (~180°)
+# Impulso "grande" (dist_max > RAIO_AJUSTE_FINO, a fase final da aproximação
+# antes do ajuste fino) -- 6x (era 4x, pedido direto do utilizador: "mais
+# metade" = multiplicar o tempo de tecla premida por 1.5).
+MULTIPLICADOR_IMPULSO_GRANDE = 6
+IMPULSO_BUSSOLA_GIGANTE = 16 * IMPULSO_BUSSOLA  # ALVO_ATRAS precisa de guinada grande (~180°) -- 16x (era 8x, pedido direto do utilizador)
 COOLDOWN_GIGANTE = 3.5  # tempo extra pós-guinada gigante para a nave estabilizar antes da próxima leitura
 TOLERANCIA_BOLA = 3.5
 
@@ -153,8 +158,71 @@ TEMPO_ROLL_45 = 0.6           # segundos de tecla premida - comecar curto e ajus
 MAX_ROLLS_RECUPERACAO = 3     # tentativas de roll antes de desistir e abortar
 TEMPO_CEGO_ANTES_ROLL = 8.0   # segundos sem leitura antes de tentar um roll
 
+# Caso a bola NUNCA tenha sido vista nesta sessão (sem última posição
+# conhecida nenhuma para obter_ultimo_comando_valido() usar) -- pedido
+# direto do utilizador: rodar até 8 vezes primeiro (mais tentativas do que
+# o MAX_ROLLS_RECUPERACAO=3 normal, que é para quando SE PERDE uma leitura
+# já conquistada); se mesmo assim continuar sem nenhuma leitura válida,
+# último recurso: impulso forte com 'w' a 16x IMPULSO_BUSSOLA -- mesma
+# magnitude do IMPULSO_BUSSOLA_GIGANTE usado no ALVO_ATRAS (também 16x,
+# pedido direto do utilizador).
+MAX_ROLLS_NUNCA_ADQUIRIDO = 8
+IMPULSO_NUNCA_ADQUIRIDO = 16 * IMPULSO_BUSSOLA
+
+# --- Roll para o topo ANTES do alinhamento fino (pedido do utilizador) ---
+# A bola da bussola roda a volta do centro quando a nave faz ROLL (nao muda
+# de posicao com pitch/yaw). Trazer a bola para o arco mais perto (cima,
+# perto de 90 graus, ou baixo, perto de 270 graus) com Q/E antes de comecar
+# a corrigir com W/A/S/D costuma ser mais direto do que uma correcao
+# diagonal a partir de um angulo qualquer -- a mesma logica do roll de
+# recuperacao (Q esquerda/E direita), so que disparada pela posicao da
+# bola, nao por estar as cegas. Perto do topo corrige-se com 'w', perto do
+# fundo com 's' -- aplica-se por igual a bola cheia e a bola oca
+# (ALVO_ATRAS), o roll so muda a posicao angular no anel, nao se o alvo
+# esta a frente ou atras.
+# Arco largo (90-45=45 graus para cada lado do eixo, 90 graus no total) --
+# reduzido de volta a 45/135 (era 60/120): o arco mais estreito estava a
+# causar um ciclo de roll esquerda/direita infinito ao vivo (a bola nunca
+# ficava tempo suficiente dentro de 60-120 antes do frame seguinte pedir
+# outro roll). Pedido direto do utilizador. Arco de baixo calculado com a
+# mesma conta, simétrico à volta de 270 graus (270-45 / 270+45) -- antes
+# era 220-300 (assimétrico, provisório).
+ARCO_TOPO_MIN_GRAUS = 45
+ARCO_TOPO_MAX_GRAUS = 135
+ARCO_FUNDO_MIN_GRAUS = 225
+ARCO_FUNDO_MAX_GRAUS = 315
+
 historico_bola_x = deque(maxlen=5)
 historico_bola_y = deque(maxlen=5)
+
+# Último comando de direção GENUÍNO (W/A/S/D ou ALVO_ATRAS) visto antes de
+# perder a bola de vista -- usado por obter_ultimo_comando_valido() para
+# continuar a deslocar-se na mesma direção enquanto a bússola está cega, em
+# vez de ficar parada ou às cegas a rodar sem saber para onde (pedido
+# direto do utilizador: "quando perde a visão, que se desloque fortemente
+# para a última posição conhecida, em vez de rodar").
+_ultimo_cmd_valido = None
+_ultimo_dist_x = 0
+_ultimo_dist_y = 0
+# Posição real (px, py) da bola no último frame em que foi vista -- guardada
+# à parte porque, se _ultimo_cmd_valido for "ALVO_ATRAS", a tecla certa
+# (w/s) depende do ÂNGULO dessa posição (ver arco topo/fundo), e esse
+# ângulo não estava a ser recalculado no replay às cegas -- caía sempre no
+# default 's' de aplicar_manobra_bussola(), mesmo com a bola vista pela
+# última vez perto do TOPO. Bug real reportado pelo utilizador ("problema
+# do 's' com a bola acima").
+_ultima_posicao_bola = None
+
+def obter_ultimo_comando_valido():
+    """ Devolve (comando, dist_x, dist_y, posicao_bola) do último frame em
+    que a bola foi vista com uma direção real a corrigir, ou None se ainda
+    não houve nenhuma leitura válida nesta sessão do processo.
+    posicao_bola é o (px, py) bruto desse frame -- necessário para
+    recalcular a tecla certa quando comando == "ALVO_ATRAS" (ver
+    _ultima_posicao_bola). """
+    if _ultimo_cmd_valido is None:
+        return None
+    return (_ultimo_cmd_valido, _ultimo_dist_x, _ultimo_dist_y, _ultima_posicao_bola)
 
 caminho_memoria = os.path.join(diretorio_atual, "memoria_bussola.json")
 caminho_coordenadas = os.path.join(diretorio_atual, "coordenadas_bussola.json")
@@ -242,36 +310,44 @@ def localizar_bola(img_bgr, cx, cy):
     
     for perfil in memoria:
         mask = cv2.inRange(img_hsv, np.array(perfil['min']), np.array(perfil['max']))
-        contornos, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if contornos:
-            ponto_contorno = max(contornos, key=cv2.contourArea)
-            if cv2.contourArea(ponto_contorno) > 2:
-                M = cv2.moments(ponto_contorno)
-                if M["m00"] != 0:
-                    px = int(M["m10"] / M["m00"])
-                    py = int(M["m01"] / M["m00"])
-                    try: is_hollow = (mask[py, px] == 0)
-                    except: is_hollow = False
-                    
-                    if is_hollow: return "ALVO_ATRAS", (px, py), mask, 0, 0
-                    
-                    historico_bola_x.append(px)
-                    historico_bola_y.append(py)
-                    if len(historico_bola_x) >= 3:
-                        dx = px - cx
-                        dy = py - cy
-                        if abs(dx) <= DEAD_ZONE_BUSSOLA and abs(dy) <= DEAD_ZONE_BUSSOLA:
-                            return "ALINHADO_MACRO", (px, py), mask, abs(dx), abs(dy)
-                        
-                        passos = []
-                        if dy < -DEAD_ZONE_BUSSOLA: passos.append("W")
-                        elif dy > DEAD_ZONE_BUSSOLA: passos.append("S")
-                        if dx < -DEAD_ZONE_BUSSOLA: passos.append("A")
-                        elif dx > DEAD_ZONE_BUSSOLA: passos.append("D")
-                        return " + ".join(passos), (px, py), mask, abs(dx), abs(dy)
-                    return "AQUECENDO", (px, py), mask, 0, 0
-                    
+        # Usa a MÁSCARA INTEIRA (contagem de pixeis + momentos), não só o
+        # maior contorno isolado -- caso real confirmado ao vivo (2026-09-16,
+        # nave mediumtransport01): perto do rebordo do anel a bola renderiza
+        # pequena e às vezes parte-se em 2+ blobs desconexos (findContours
+        # devolvia 2 contornos separados), cada um com área geométrica ínfima
+        # (cv2.contourArea do maior = 1.0) que o antigo "> 2" rejeitava como
+        # "não detetado" mesmo com 7 pixeis da cor certa genuinamente
+        # presentes -- e essa bola era mesmo uma bola OCA (ALVO_ATRAS), nunca
+        # chegava a ser classificada como tal. Contagem de pixeis da máscara
+        # inteira é robusta a fragmentação; o "> 2" em si mantém-se (mesmo
+        # limiar de ruído mínimo, só muda a medida).
+        n_pixeis = cv2.countNonZero(mask)
+        if n_pixeis > 2:
+            M = cv2.moments(mask, binaryImage=True)
+            if M["m00"] != 0:
+                px = int(M["m10"] / M["m00"])
+                py = int(M["m01"] / M["m00"])
+                try: is_hollow = (mask[py, px] == 0)
+                except: is_hollow = False
+
+                if is_hollow: return "ALVO_ATRAS", (px, py), mask, 0, 0
+
+                historico_bola_x.append(px)
+                historico_bola_y.append(py)
+                if len(historico_bola_x) >= 3:
+                    dx = px - cx
+                    dy = py - cy
+                    if abs(dx) <= DEAD_ZONE_BUSSOLA and abs(dy) <= DEAD_ZONE_BUSSOLA:
+                        return "ALINHADO_MACRO", (px, py), mask, abs(dx), abs(dy)
+
+                    passos = []
+                    if dy < -DEAD_ZONE_BUSSOLA: passos.append("W")
+                    elif dy > DEAD_ZONE_BUSSOLA: passos.append("S")
+                    if dx < -DEAD_ZONE_BUSSOLA: passos.append("A")
+                    elif dx > DEAD_ZONE_BUSSOLA: passos.append("D")
+                    return " + ".join(passos), (px, py), mask, abs(dx), abs(dy)
+                return "AQUECENDO", (px, py), mask, 0, 0
+
     historico_bola_x.clear()
     historico_bola_y.clear()
     return "NÃO_DETETADO", None, mascara_final, 0, 0
@@ -332,17 +408,23 @@ def localizar_alvo_hud(sct):
 # ==========================================
 # 4. CONTROLADORES DE VOO CX_NEUTRO
 # ==========================================
-def aplicar_manobra_bussola(comando, dist_x, dist_y):
+def aplicar_manobra_bussola(comando, dist_x, dist_y, tecla_giant='s', forcar_forte=False):
     if comando in ["NÃO_DETETADO", "ALINHADO_MACRO", "AQUECENDO"]:
         largar_todas_as_teclas()
         return
-        
+
     if comando == "ALVO_ATRAS":
-        for t in ["w", "a", "d"]: pydirectinput.keyUp(t)
-        print(f"[INFO] ALVO_ATRAS -> IMPULSO GIGANTE (8x IMPULSO_BUSSOLA): ['s']")
-        pydirectinput.keyDown('s')
+        # tecla_giant vem de quem chama (executar_passo_alinhamento), que já
+        # rolou a bola oca até ao arco de cima ('w') ou de baixo ('s') --
+        # antes disto estava sempre fixo em 's', ignorando a posição real da
+        # bola no anel (bug real, ver log de 02:12 desta conversa: ciclava
+        # 'ALVO_ATRAS -> ... ['s']' sem nunca resolver o ALIGN WARNING).
+        for t in ["w", "s", "a", "d"]:
+            if t != tecla_giant: pydirectinput.keyUp(t)
+        print(f"[INFO] ALVO_ATRAS -> IMPULSO GIGANTE (16x IMPULSO_BUSSOLA): ['{tecla_giant}']")
+        pydirectinput.keyDown(tecla_giant)
         time.sleep(IMPULSO_BUSSOLA_GIGANTE)
-        pydirectinput.keyUp('s')
+        pydirectinput.keyUp(tecla_giant)
         time.sleep(COOLDOWN_GIGANTE)
         return
 
@@ -355,17 +437,23 @@ def aplicar_manobra_bussola(comando, dist_x, dist_y):
     for t in ["w", "s", "a", "d"]:
         if t not in teclas_necessarias: pydirectinput.keyUp(t)
 
-    dist_max = max(dist_x, dist_y)
+    # forcar_forte ignora a distância medida e força sempre o impulso
+    # "grande" -- usado por quem repete o último comando conhecido às cegas
+    # (obter_ultimo_comando_valido()), onde a distância guardada pode ser
+    # pequena (quase alinhado no momento em que perdeu a bola) mas o
+    # utilizador pediu para se deslocar FORTEMENTE, não fazer um micro-
+    # ajuste, enquanto não reencontra a bola.
+    dist_max = (RAIO_AJUSTE_FINO + 1) if forcar_forte else max(dist_x, dist_y)
     teclas_ws = [t for t in teclas_necessarias if t in ("w", "s")]
     teclas_ad = [t for t in teclas_necessarias if t in ("a", "d")]
 
     if dist_max > RAIO_AJUSTE_FINO:
-        print(f"[INFO] 4 * IMPULSO_BUSSOLA: {teclas_necessarias}")
+        print(f"[INFO] {MULTIPLICADOR_IMPULSO_GRANDE} * IMPULSO_BUSSOLA: {teclas_necessarias}")
         for t in teclas_necessarias: pydirectinput.keyDown(t)
-        time.sleep(4 * IMPULSO_BUSSOLA)
+        time.sleep(MULTIPLICADOR_IMPULSO_GRANDE * IMPULSO_BUSSOLA)
         for t in teclas_ws: pydirectinput.keyUp(t)
         if teclas_ad:
-            time.sleep((MULTIPLICADOR_LATERAL - 1) * 4 * IMPULSO_BUSSOLA)
+            time.sleep((MULTIPLICADOR_LATERAL - 1) * MULTIPLICADOR_IMPULSO_GRANDE * IMPULSO_BUSSOLA)
             for t in teclas_ad: pydirectinput.keyUp(t)
         time.sleep(2.0)
     else:
@@ -414,6 +502,18 @@ def mostrar_debug_visual(passo, cx_neutro, cy_neutro):
     if not _janela_debug_iniciada:
         cv2.namedWindow(NOME_JANELA_PROD, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(NOME_JANELA_PROD, 300, 350)
+        # Se houver um ecrã secundário, manda a janela para lá em vez de
+        # ficar por cima do jogo (mesmo padrão já usado noutros ficheiros
+        # do projeto, ex.: undocking.py::inicializar_infraestrutura()) --
+        # sct.monitors[1] é o ecrã do jogo, [2] é o secundário quando existe.
+        try:
+            with mss.mss() as sct_janela:
+                monitores = sct_janela.monitors
+                if len(monitores) > 2:
+                    ecra_secundario = monitores[2]
+                    cv2.moveWindow(NOME_JANELA_PROD, ecra_secundario["left"] + 50, ecra_secundario["top"] + 50)
+        except Exception as e:
+            print(f"[AVISO] Falha ao mover a janela do olho para o ecrã secundário: {e}")
         _janela_debug_iniciada = True
 
     img_bussola = passo["img_bussola"]
@@ -453,15 +553,35 @@ def fechar_debug_visual():
             pass
         _janela_debug_iniciada = False
 
-def executar_roll_recuperacao(tentativa):
+def executar_roll_recuperacao(tentativa, max_tentativas=MAX_ROLLS_RECUPERACAO):
     """ Roda a nave ~45 graus sobre o eixo longitudinal para tirar um planeta
-    ou um brilho da frente do HUD/alvo. Nao mexe na direcao do nariz. """
+    ou um brilho da frente do HUD/alvo. Nao mexe na direcao do nariz.
+    max_tentativas so serve para a mensagem ficar correta -- quem chama
+    (ver obter_ultimo_comando_valido()/MAX_ROLLS_NUNCA_ADQUIRIDO) e que
+    decide de facto quantas tentativas permite antes de desistir. """
     largar_todas_as_teclas()
-    print(f"[RECUPERACAO] Leitura bloqueada (planeta/brilho?). ROLL ~45 graus - tentativa {tentativa}/{MAX_ROLLS_RECUPERACAO}...")
-    logging.warning(f"Roll de recuperacao {tentativa}/{MAX_ROLLS_RECUPERACAO} (tecla '{TECLA_ROLL}', {TEMPO_ROLL_45}s)")
+    print(f"[RECUPERACAO] Leitura bloqueada (planeta/brilho?). ROLL ~45 graus - tentativa {tentativa}/{max_tentativas}...")
+    logging.warning(f"Roll de recuperacao {tentativa}/{max_tentativas} (tecla '{TECLA_ROLL}', {TEMPO_ROLL_45}s)")
     pydirectinput.keyDown(TECLA_ROLL)
     time.sleep(TEMPO_ROLL_45)
     pydirectinput.keyUp(TECLA_ROLL)
+    time.sleep(2.0)  # estabilizar antes da proxima leitura
+
+def executar_impulso_nunca_adquirido():
+    """ Último recurso quando a bola NUNCA foi vista nesta sessão (sem
+    última posição conhecida nenhuma para se deslocar) e já se esgotaram
+    MAX_ROLLS_NUNCA_ADQUIRIDO rolls de recuperação sem resultado --
+    desloca-se fortemente com 'w' (IMPULSO_NUNCA_ADQUIRIDO = 16x
+    IMPULSO_BUSSOLA) na esperança de sair do que quer que esteja a
+    bloquear a vista. Pedido direto do utilizador. """
+    largar_todas_as_teclas()
+    print(f"[RECUPERACAO] Bola nunca vista + {MAX_ROLLS_NUNCA_ADQUIRIDO} rolls sem efeito -- "
+          f"último recurso: impulso forte 'w' ({IMPULSO_NUNCA_ADQUIRIDO:.1f}s).")
+    logging.warning(f"Impulso de ultimo recurso 'w' ({IMPULSO_NUNCA_ADQUIRIDO:.1f}s) -- bola nunca adquirida "
+                     f"apos {MAX_ROLLS_NUNCA_ADQUIRIDO} rolls de recuperacao.")
+    pydirectinput.keyDown('w')
+    time.sleep(IMPULSO_NUNCA_ADQUIRIDO)
+    pydirectinput.keyUp('w')
     time.sleep(2.0)  # estabilizar antes da proxima leitura
 
 def executar_passo_alinhamento(sct, area_bussola, cx_neutro, cy_neutro):
@@ -479,6 +599,16 @@ def executar_passo_alinhamento(sct, area_bussola, cx_neutro, cy_neutro):
     encontrou_hud, dx_hud, dy_hud, img_hud, max_val_hud, nome_tpl_hud = localizar_alvo_hud(sct)
 
     alvo_nas_costas = (cmd_bussola == "ALVO_ATRAS")
+
+    # Guarda a última direção genuína (W/A/S/D ou ALVO_ATRAS) para
+    # obter_ultimo_comando_valido() -- ignora "AQUECENDO" (ainda a encher o
+    # histórico, não é uma direção real) e "ALINHADO_MACRO" (já não há
+    # direção nenhuma a manter, a bola está no centro).
+    if coords_bola and cmd_bussola not in ("AQUECENDO", "ALINHADO_MACRO"):
+        global _ultimo_cmd_valido, _ultimo_dist_x, _ultimo_dist_y, _ultima_posicao_bola
+        _ultimo_cmd_valido = cmd_bussola
+        _ultimo_dist_x, _ultimo_dist_y = dist_x, dist_y
+        _ultima_posicao_bola = coords_bola
 
     resultado = {
         "img_bussola": img_bussola, "mask_hsv": mask_hsv, "coords_bola": coords_bola,
@@ -510,11 +640,81 @@ def executar_passo_alinhamento(sct, area_bussola, cx_neutro, cy_neutro):
         largar_todas_as_teclas()
     else:
         if not coords_bola:
-            resultado["comando_display"] = "MACRO: NÃO_DETETADO"
-            largar_todas_as_teclas()
+            # Bússola cega -- em vez de ficar parada (largar_todas_as_
+            # teclas), desloca-se FORTEMENTE na direção do último comando
+            # conhecido até a bola voltar a aparecer (pedido direto do
+            # utilizador: "quando perde a visão, que se desloque fortemente
+            # para a última posição conhecida, em vez de rodar"). Só faz
+            # sentido se já houve alguma leitura válida nesta sessão --
+            # sem isso não há "última posição" nenhuma para onde ir.
+            ultimo = obter_ultimo_comando_valido()
+            if ultimo is not None:
+                cmd_ultimo, dx_ultimo, dy_ultimo, pos_ultima = ultimo
+                if cmd_ultimo == "ALVO_ATRAS" and pos_ultima is not None:
+                    # A tecla certa (w/s) para ALVO_ATRAS depende do ÂNGULO
+                    # da última posição vista, não é fixa -- sem isto, o
+                    # replay às cegas caía sempre no default 's' de
+                    # aplicar_manobra_bussola(), mesmo com a bola vista pela
+                    # última vez perto do TOPO (devia ser 'w'). Bug real
+                    # reportado pelo utilizador ("problema do 's' com a bola
+                    # acima"). Mesma convenção de ângulo usada no ramo
+                    # coords_bola abaixo.
+                    dx_u = pos_ultima[0] - cx_neutro
+                    dy_u = pos_ultima[1] - cy_neutro
+                    angulo_u = math.degrees(math.atan2(-dy_u, dx_u)) % 360
+                    tecla_giant_ultima = 'w' if angulo_u < 180 else 's'
+                    resultado["comando_display"] = f"CEGO -- ALVO_ATRAS última posição ({angulo_u:.0f}°) -> impulso forte '{tecla_giant_ultima}'"
+                    aplicar_manobra_bussola(cmd_ultimo, dx_ultimo, dy_ultimo, tecla_giant=tecla_giant_ultima, forcar_forte=True)
+                else:
+                    resultado["comando_display"] = f"CEGO -- desloca fortemente p/ última posição conhecida ({cmd_ultimo})"
+                    aplicar_manobra_bussola(cmd_ultimo, dx_ultimo, dy_ultimo, forcar_forte=True)
+            else:
+                resultado["comando_display"] = "MACRO: NÃO_DETETADO"
+                largar_todas_as_teclas()
         else:
-            resultado["comando_display"] = f"MACRO: {cmd_bussola}"
-            aplicar_manobra_bussola(cmd_bussola, dist_x, dist_y)
+            # Roll para o arco vertical mais próximo ANTES do alinhamento/
+            # impulso: se a bola está na metade de cima (0-180°), o alvo é
+            # rolado até ao arco de cima (60-120°) e corrige-se com 'w';
+            # se está na metade de baixo (180-360°), rola-se até ao arco de
+            # baixo (220-300°, ainda provisório) e corrige-se com 's'.
+            # Aplica-se por igual a bola cheia e a bola OCA (ALVO_ATRAS) --
+            # o roll só muda a posição angular da bola no anel da bússola,
+            # não se o alvo está à frente ou atrás da nave, por isso a
+            # mesma lógica de arco serve para os dois casos (antes disto, a
+            # bola oca ignorava a própria posição e disparava sempre o
+            # impulso gigante com 's', ver bug real no log de 02:12 desta
+            # conversa). Ângulo medido a partir do centro (cx_neutro,
+            # cy_neutro); convenção 0°=direita, 90°=cima, 180°=esquerda,
+            # 270°=baixo (-dy porque o eixo Y da imagem cresce para baixo).
+            dx_bola = coords_bola[0] - cx_neutro
+            dy_bola = coords_bola[1] - cy_neutro
+            angulo_bola = math.degrees(math.atan2(-dy_bola, dx_bola)) % 360
+
+            metade_superior = angulo_bola < 180
+            if metade_superior:
+                arco_min, arco_max, tecla_eixo = ARCO_TOPO_MIN_GRAUS, ARCO_TOPO_MAX_GRAUS, 'w'
+            else:
+                arco_min, arco_max, tecla_eixo = ARCO_FUNDO_MIN_GRAUS, ARCO_FUNDO_MAX_GRAUS, 's'
+
+            if not (arco_min <= angulo_bola <= arco_max):
+                tecla_roll = 'q' if dx_bola < 0 else 'e'
+                nome_arco = "TOPO" if metade_superior else "FUNDO"
+                resultado["comando_display"] = f"ROLL PARA O ARCO {nome_arco} ({angulo_bola:.0f}° -> '{tecla_roll}')"
+                largar_todas_as_teclas()
+                pydirectinput.keyDown(tecla_roll)
+                time.sleep(TEMPO_ROLL_45)
+                pydirectinput.keyUp(tecla_roll)
+                # Cooldown antes da próxima leitura -- mesmo valor já usado
+                # em executar_roll_recuperacao() para o mesmo tipo de
+                # manobra (roll). Sem isto, o frame seguinte lia a bola
+                # ainda a meio do movimento do roll, antes de estabilizar.
+                time.sleep(2.0)
+            elif alvo_nas_costas:
+                resultado["comando_display"] = f"MACRO: ALVO_ATRAS ({angulo_bola:.0f}° dentro do arco -- impulso gigante '{tecla_eixo}')"
+                aplicar_manobra_bussola(cmd_bussola, dist_x, dist_y, tecla_giant=tecla_eixo)
+            else:
+                resultado["comando_display"] = f"MACRO: {cmd_bussola}"
+                aplicar_manobra_bussola(cmd_bussola, dist_x, dist_y)
 
     return resultado
 
@@ -532,6 +732,7 @@ if __name__ == "__main__":
     tempo_cego = None
     LIMITE_CEGO = 30.0
     rolls_recuperacao = 0   # rolls de ~45 graus ja gastos nesta manobra
+    impulso_final_tentado = False  # ver MAX_ROLLS_NUNCA_ADQUIRIDO/executar_impulso_nunca_adquirido()
     tempo_sem_hud = None    # bola ALINHADO_MACRO mas alvo do HUD invisivel (possivel brilho)
     tempo_inicio_manobra = time.time()
     LIMITE_MANOBRA = 180.0
@@ -579,6 +780,7 @@ if __name__ == "__main__":
                     tempo_cego = None
                     tempo_sem_hud = None
                     rolls_recuperacao = 0  # leitura recuperada; futuras perdas tem direito a novos rolls
+                    impulso_final_tentado = False
 
                     if tempo_inicio_centrado is None:
                         tempo_inicio_centrado = time.time()
@@ -595,21 +797,37 @@ if __name__ == "__main__":
                     tempo_cego = None
                     tempo_sem_hud = None
                     rolls_recuperacao = 0
+                    impulso_final_tentado = False
                     tempo_inicio_centrado = None
                 else:
                     tempo_inicio_centrado = None
 
                     if not coords_bola:
-                        if tempo_cego is None: tempo_cego = time.time()
+                        if obter_ultimo_comando_valido() is not None:
+                            # Já em movimento forte para a última posição
+                            # conhecida, dentro de executar_passo_alinhamento()
+                            # -- nada a fazer aqui, só reiniciar a janela.
+                            tempo_cego = None
+                        elif tempo_cego is None:
+                            tempo_cego = time.time()
                         elif (time.time() - tempo_cego > TEMPO_CEGO_ANTES_ROLL
-                              and rolls_recuperacao < MAX_ROLLS_RECUPERACAO):
-                            # Grande parte destes casos e um planeta/brilho a tapar a
-                            # bussola - rodar ~45 graus costuma resolver sem abortar.
+                              and rolls_recuperacao < MAX_ROLLS_NUNCA_ADQUIRIDO):
+                            # Bola NUNCA vista nesta sessão -- não há última
+                            # posição para se deslocar. Grande parte destes
+                            # casos e um planeta/brilho a tapar a bussola -
+                            # rodar ~45 graus costuma resolver sem abortar.
                             rolls_recuperacao += 1
-                            executar_roll_recuperacao(rolls_recuperacao)
+                            executar_roll_recuperacao(rolls_recuperacao, max_tentativas=MAX_ROLLS_NUNCA_ADQUIRIDO)
                             tempo_cego = None  # reinicia a janela de observacao apos o roll
+                        elif rolls_recuperacao >= MAX_ROLLS_NUNCA_ADQUIRIDO and not impulso_final_tentado:
+                            # Rolls esgotados e continua sem nenhuma leitura --
+                            # último recurso antes de desistir (pedido direto
+                            # do utilizador).
+                            executar_impulso_nunca_adquirido()
+                            impulso_final_tentado = True
+                            tempo_cego = None
                         elif time.time() - tempo_cego > LIMITE_CEGO:
-                            abortar_com_erro(f"Perda prolongada de telemetria visual da bússola ({rolls_recuperacao} rolls de recuperação sem efeito).")
+                            abortar_com_erro(f"Perda prolongada de telemetria visual da bússola ({rolls_recuperacao} rolls + impulso de último recurso sem efeito).")
                     else:
                         tempo_cego = None
                         if cmd_bussola == "ALINHADO_MACRO" and not encontrou_hud:

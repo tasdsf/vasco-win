@@ -192,6 +192,92 @@ def aguardar_confirmacao_compra(posicao_ancora, timeout=30):
     return False
 
 # ==========================================
+# 1c. VALIDAÇÃO DO PORÃO ANTES DE COMPRAR
+# ==========================================
+# Nomes internos do journal (evento Cargo -> Inventory[].Name), mesmos
+# aceites em MarketBuy/MarketSell -- ver TIPOS_RARE_ACEITES acima.
+ITEM_POR_ESTACAO = {
+    "FUTEN": "fujintea",
+    "HAMMEL": "kamitracigars",
+}
+
+def obter_cargo_inventario():
+    """ Lê o snapshot atual do porão (Cargo.json, escrito pelo próprio jogo
+    sempre que o porão muda) -- devolve (count_total, lista Inventory[]).
+    Duplicado de vender.py::obter_cargo_atual() por convenção do projeto
+    (scripts Windows não partilham imports entre si), estendido para
+    devolver também o Inventory (nome de cada item a bordo), não só o
+    total. """
+    caminho = os.path.join(LOG_DIR, 'Cargo.json')
+    try:
+        with open(caminho, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get('Count', 0), data.get('Inventory', [])
+    except Exception:
+        return None, []  # desconhecido -- não bloquear o fluxo por causa disto
+
+def obter_estacao_atual():
+    """ Lê o Journal para trás à procura do último 'StationName' (evento
+    Docked/Location) -- mesma ideia de obter_tipo_estacao_atual() em
+    undocking.py, só que aqui interessa o NOME da estação (para saber qual
+    dos dois itens raros esperar), não o tipo. """
+    latest_log = get_latest_log()
+    if not latest_log: return None
+    try:
+        with open(latest_log, 'r', encoding='utf-8') as f:
+            linhas = f.readlines()
+        for linha in reversed(linhas):
+            try:
+                data = json.loads(linha)
+            except json.JSONDecodeError:
+                continue
+            if 'StationName' in data and data.get('event') in ('Docked', 'Location'):
+                return data['StationName']
+        return None
+    except Exception:
+        return None
+
+def item_esperado_para_estacao(nome_estacao):
+    """ Futen Spaceport -> Fujin Tea, Hammel Terminal -> Kamitra Cigars --
+    mesmo critério de negócio já usado em supercruise_assist.py (cargo/
+    sistema -> destino). None se a estação não for nenhuma das duas
+    conhecidas. """
+    if not nome_estacao:
+        return None
+    nome_upper = nome_estacao.upper()
+    for chave, item in ITEM_POR_ESTACAO.items():
+        if chave in nome_upper:
+            return item
+    return None
+
+def validar_porao_antes_de_comprar():
+    """ Só vale a pena comprar com o porão VAZIO do item em questão -- se já
+    tiver o item a bordo (compra já confirmada antes, ex.: retry pós-falha
+    depois de MarketBuy já ter disparado), a compra é saltada em vez de
+    comprar a mais/duplicar. Devolve False (saltar) quando o item esperado
+    para esta estação já está no porão com Count > 0; True (prosseguir)
+    caso contrário -- incluindo quando a estação/item não é reconhecível,
+    para não bloquear o fluxo às cegas. """
+    cargo_total, inventario = obter_cargo_inventario()
+    nome_estacao = obter_estacao_atual()
+    item_esperado = item_esperado_para_estacao(nome_estacao)
+    print(f"[CONTEXTO] Estação atual: {nome_estacao or 'desconhecida'} | "
+          f"Item esperado: {item_esperado or 'desconhecido'} | Porão: {cargo_total}")
+
+    if item_esperado:
+        for entrada in (inventario or []):
+            if entrada.get('Name', '').lower() == item_esperado and entrada.get('Count', 0) > 0:
+                nome_bonito = entrada.get('Name_Localised', item_esperado)
+                print(f"[OK] Já há {entrada.get('Count')}x {nome_bonito} no porão -- compra já feita, a saltar.")
+                _logger.info(f"Porao ja tem {item_esperado} (x{entrada.get('Count')}) -- compra saltada, comprar.py sai sem executar.")
+                return False
+    elif cargo_total:
+        print(f"[AVISO] Estação atual não reconhecida (nem Futen nem Hammel) mas há carga a bordo "
+              f"({cargo_total}) -- a prosseguir sem saltar, validação de item não é possível.")
+
+    return True
+
+# ==========================================
 # 2. MOTOR DE VISÃO
 # ==========================================
 def procurar_template(template, nome_label, monitor, threshold=0.80, debug=False):
@@ -365,10 +451,14 @@ def executar_ciclo_completo():
 
 if __name__ == "__main__":
     inicializar_infraestrutura()
-    
+
     print("O R2D2 assume os comandos em 1 segundos...")
     time.sleep(1)
-    executar_ciclo_completo()
-    
+
+    if validar_porao_antes_de_comprar():
+        executar_ciclo_completo()
+    else:
+        print("\n>>> COMPRA SALTADA -- porão já tem o item desta estação. <<<")
+
     if VISUAL_DEBUG:
         cv2.destroyAllWindows()

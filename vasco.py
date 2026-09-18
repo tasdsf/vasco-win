@@ -16,7 +16,7 @@ import keyboard
 
 # ADICIONADO: Importar a função do verificador de linha de visão
 from los_checker import calcular_espera_los
-from discord_notify import notificar_erro_discord
+from discord_notify import notificar_erro_discord, notificar_info_discord
 from leg_state import reiniciar_leg_limpa, marcar_leg_suja
 
 # Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
@@ -76,6 +76,15 @@ def save_state(step, success, error=None, completed_steps=None):
     with open(STATE_FILE, 'w', encoding='utf-8') as f:
         json.dump(state, f, indent=2)
 
+# Exit code especial: o próprio script filho já reescreveu vasco_state.json
+# (ver supercruise_assist.py::_voltar_para_origem_por_oclusao_los) porque
+# decidiu voltar para trás (oclusão de LOS confirmada a meio do voo) --
+# NÃO é um sucesso (o destino original não foi alcançado) nem uma falha
+# normal (não é para gastar retries nem mostrar o menu interativo). O
+# main() deteta este código e volta a carregar current_step do disco em
+# vez de incrementar ou tratar como erro.
+EXIT_CODE_ESTADO_SOBRESCRITO = 42
+
 SCRIPTS = {
     "comprar": "comprar.py",
     "target_carrier": "select_target.py",
@@ -94,12 +103,12 @@ SEQUENCE = {
     # OLHO removido daqui -- o alinhamento ja acontece durante o proprio
     # SUPERCRUISE (engatar_assist_e_alinhar em supercruise_assist.py corrige
     # ativamente o alinhamento antes de confirmar o assist).
-    4: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
+    4: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido", "retry_count": 6},
     5: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock no fleet carrier"},
     6: {"name": "VENDER", "script": SCRIPTS["vender"], "desc": "Vender Fujin Tea no Zahir"},
     7: {"name": "SELECT_STATION", "script": SCRIPTS["station"], "desc": "Selecionar estacao de origem"},
     8: {"name": "UNDOCKING", "script": SCRIPTS["undocking"], "desc": "Undock da estacao"},
-    9: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido"},
+    9: {"name": "SUPERCRUISE", "script": SCRIPTS["supercruise"], "desc": "Supercruise assistido", "retry_count": 6},
     # Corrigido: esta etapa faz dock na estacao de origem (fim do ciclo), nao no fleet carrier.
     10: {"name": "DOCKING", "script": SCRIPTS["docking"], "desc": "Dock na estacao de origem"},
 }
@@ -119,25 +128,34 @@ def _notificar_falha_discord(script_name, error_msg):
     except Exception as e:
         print(f"[AVISO] Falha ao notificar Discord: {e}")
 
-def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5):
+def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5, step_number=None):
     script_path = SCRIPT_DIR / script_name
     if not script_path.exists():
         return False, f"Script nao encontrado: {script_name}", "FILE_NOT_FOUND"
-    
+
     logger = setup_logger()
     logger.info(f"Executando: {script_name}")
-    
+
     print(f"\n[ETAPA] Executando: {script_name}")
     print(f"    Descricao: {script_name}")
     print(f"    Timeout: {timeout}s | Retry: {retry_count}x")
-    
+
     # "-u": forca stdout/stderr sem buffer no processo filho. Sem isto, quando
     # o stdout esta ligado a um pipe (como aqui), o Python muda para block
     # buffering e os prints do script ficam presos ate o buffer encher ou o
     # processo terminar - dava a sensacao de "nao acontece nada" mesmo com o
     # script a correr por baixo.
     cmd = [sys.executable, "-u", str(script_path)]
-    
+
+    # VASCO_STEP_NUMBER: diz ao filho qual o número da etapa da SEQUENCE que
+    # está a correr (ex.: 4 ou 9, as duas etapas SUPERCRUISE) -- usado por
+    # supercruise_assist.py para saber em que perna do ciclo está (rumo ao
+    # carrier ou rumo à estação) quando decide voltar para trás por oclusão
+    # de LOS confirmada a meio do voo (ver EXIT_CODE_ESTADO_SOBRESCRITO).
+    env = os.environ.copy()
+    if step_number is not None:
+        env["VASCO_STEP_NUMBER"] = str(step_number)
+
     max_retries = retry_count
     for attempt in range(max_retries):
         try:
@@ -147,9 +165,10 @@ def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                universal_newlines=True
+                universal_newlines=True,
+                env=env
             )
-            
+
             with proc.stdout:
                 full_output = ""
                 for line in iter(proc.stdout.readline, ""):
@@ -157,10 +176,17 @@ def executar_script(script_name, timeout=600, retry_count=3, retry_delay=5):
                     full_output += line + "\n"
                     if line:
                         print(line)
-            
+
             returncode = proc.wait(timeout=timeout)
             proc.stdout.close()
-            
+
+            if returncode == EXIT_CODE_ESTADO_SOBRESCRITO:
+                # O filho já reescreveu vasco_state.json sozinho -- não gastar
+                # retries nem mostrar o menu de falha interativo, ver main().
+                logger.info(f"Etapa {script_name} devolveu estado reescrito pelo próprio "
+                            f"script (voltar à origem por oclusão de LOS confirmada).")
+                return None, "Estado reescrito pelo próprio script (voltar à origem)", EXIT_CODE_ESTADO_SOBRESCRITO
+
             if returncode == 0:
                 full_output = full_output[:5000] if full_output else ""
                 logger.info(f"Etapa {script_name} concluida com sucesso (attempt: {attempt+1})")
@@ -267,10 +293,29 @@ def main():
                     h, resto = divmod(int(espera), 3600)
                     m, s = divmod(resto, 60)
                     agora_utc_los = datetime.now(timezone.utc)
+                    agora_pt_los = agora_utc_los + timedelta(hours=1)
                     partida_utc = agora_utc_los + timedelta(seconds=espera)
                     partida_pt = partida_utc + timedelta(hours=1)
                     print(f"[LOS] Destino obscurecido pelo planeta.\n A aguardar {h}h {m}m {s}s... "
                           f"Partida UTC {partida_utc.strftime('%H:%M:%S')} / PT {partida_pt.strftime('%H:%M:%S')}")
+                    # Notifica o Discord sempre que o vasco para por oclusão
+                    # (linha de visão estação<->carrier bloqueada pelo
+                    # planeta) -- pedido direto do utilizador: quando parou,
+                    # quanto tempo vai esperar, e quando retoma. Best-effort
+                    # (nunca bloqueia a espera em si).
+                    try:
+                        notificar_info_discord(
+                            "vasco.py",
+                            f"Pausado por oclusão de LOS antes de {step_info['name']} "
+                            f"(destino obscurecido pelo planeta).\n"
+                            f"Parou às {agora_utc_los.strftime('%H:%M:%S')} UTC / "
+                            f"{agora_pt_los.strftime('%H:%M:%S')} PT.\n"
+                            f"Espera prevista: {h}h {m}m {s}s.\n"
+                            f"Retoma às {partida_utc.strftime('%H:%M:%S')} UTC / "
+                            f"{partida_pt.strftime('%H:%M:%S')} PT."
+                        )
+                    except Exception as e:
+                        print(f"[AVISO] Falha ao notificar Discord (pausa LOS): {e}")
                     time.sleep(espera)
 
                 reiniciar_leg_limpa()
@@ -282,9 +327,23 @@ def main():
                 step_info["script"],
                 timeout=step_info.get("timeout", 600),
                 retry_count=step_info.get("retry_count", 3),
-                retry_delay=step_info.get("retry_delay", 5)
+                retry_delay=step_info.get("retry_delay", 5),
+                step_number=current_step
             )
-            
+
+            if success is None and error_code == EXIT_CODE_ESTADO_SOBRESCRITO:
+                # O script já decidiu voltar à origem (oclusão de LOS
+                # confirmada a meio do voo) e reescreveu vasco_state.json
+                # com o current_step/completed_steps corretos para a viagem
+                # de regresso -- recarrega do disco em vez de incrementar ou
+                # tratar como falha (nada de menu interativo nem retries).
+                print(f"\n[LOS] {step_info['name']}: {error_msg}")
+                logger.info(f"Etapa {step_info['name']}: estado reescrito pelo filho, a recarregar vasco_state.json.")
+                state = load_state()
+                current_step = state.get("last_step", -1) + 1
+                completed_steps = state.get("completed_steps", [])
+                continue
+
             if success:
                 print(f"[SUCESSO] Etapa {step_info['name']} concluida!")
                 completed_steps.append(current_step)

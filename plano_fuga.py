@@ -115,20 +115,36 @@ def _passo_evasivo():
 
 def pode_saltar_agora(debug=False):
     """ Valida por telemetria se faz sentido tentar 'j' neste ciclo -- sem
-    mass lock e sem hardpoints em baixo, as duas causas conhecidas de falha
-    de salto ja usadas em supercruise_assist.py::iniciar_salto_seguro(). Se
-    detetar hardpoints em baixo, recolhe-os logo ('u') e devolve False nesta
-    volta -- da tempo a animacao de recolha antes de tentar o salto na volta
-    seguinte. Mass lock nao tem remedio por tecla (so afastar-nos, o que o
-    boost ja esta a fazer), por isso so e reportado, nao remediado. """
+    mass lock, sem hardpoints em baixo (as duas causas conhecidas de falha
+    de salto ja usadas em supercruise_assist.py::iniciar_salto_seguro()) e
+    sem o FSD JA a carregar. Se detetar hardpoints em baixo, recolhe-os logo
+    ('u') e devolve False nesta volta -- da tempo a animacao de recolha
+    antes de tentar o salto na volta seguinte. Mass lock nao tem remedio por
+    tecla (so afastar-nos, o que o boost ja esta a fazer), por isso so e
+    reportado, nao remediado.
+
+    FSD_CHARGING bloqueia 'j' pelo mesmo motivo -- 'j' e um TOGGLE do FSD:
+    prime-lo outra vez enquanto ja esta a carregar CANCELA a carga em curso
+    em vez de a repetir. Bug real identificado nesta conversa: se
+    aguardar_supercruise_confirmado() expirar (30s) com a carga ainda
+    genuinamente a meio (Status.json atrasado, ou carga so mais lenta que
+    30s), o ciclo anterior voltava a chamar esta funcao, que so olhava para
+    mass lock/hardpoints -- ignorava que o FSD ja estava a carregar -- e
+    deixava executar_fuga() premir 'j' outra vez, cancelando o proprio
+    salto que ja ia a meio. """
     flags = ler_telemetria(debug=debug)
     mass_locked = bool(flags & STATUS_FLAGS["FSD_MASS_LOCKED"])
     hardpoints = bool(flags & STATUS_FLAGS["HARDPOINTS_DEPLOYED"])
+    ja_a_carregar = bool(flags & STATUS_FLAGS["FSD_CHARGING"])
 
     if hardpoints:
         print("[PLANO_FUGA] Hardpoints em baixo -- a recolher (U)...")
         logging.info("Plano de fuga: hardpoints deployed detetados, a enviar 'u' para recolher.")
         pydirectinput.press('u')
+        return False
+
+    if ja_a_carregar:
+        print("[PLANO_FUGA] FSD já em carga (tentativa anterior) -- a não repetir 'j' (cancelaria a carga em curso).")
         return False
 
     return not mass_locked
@@ -148,13 +164,17 @@ def aguardar_supercruise_confirmado(timeout=30):
 
 def executar_fuga():
     """ Ponto de entrada chamado por supercruise_assist.py. Ciclo, em cada
-    volta: evasao incondicional (_passo_evasivo) -> valida por telemetria se
-    o FSD esta disponivel agora (pode_saltar_agora) -> se sim, tenta 'j' +
-    'shiftright' e confirma se o FSD passou mesmo a carregar; se nao, so a
-    evasao desta volta conta e repete. Depois de confirmar carga, espera a
-    confirmacao de Supercruise pela telemetria antes de devolver o controlo.
-    Devolve True em caso de sucesso; aborta o processo (180s) se nunca
-    conseguir reentrar em Supercruise. """
+    volta: evasao incondicional (_passo_evasivo) -> se o FSD JA estiver a
+    carregar (tentativa anterior), NAO repete 'j' -- so continua a
+    monitorizar a confirmacao de Supercruise (ver pode_saltar_agora(), que
+    bloqueia 'j' nesse caso: e um toggle, repeti-lo cancelava a carga em
+    curso). Caso contrario, valida por telemetria se o FSD esta disponivel
+    agora -> se sim, tenta 'j' + 'shiftright' e confirma se passou mesmo a
+    carregar; se nao, so a evasao desta volta conta e repete. Depois de
+    confirmar/detetar carga (nova ou ja em curso), espera a confirmacao de
+    Supercruise pela telemetria antes de devolver o controlo. Devolve True
+    em caso de sucesso; aborta o processo (180s) se nunca conseguir
+    reentrar em Supercruise. """
     print("\n>>> PLANO DE FUGA: queda de Supercruise nao identificada como chegada. A iniciar ciclo de fuga.")
     logging.info("Plano de fuga acionado.")
 
@@ -166,25 +186,32 @@ def executar_fuga():
         print(f"\n[PLANO_FUGA] Ciclo {tentativas}: velocidade maxima + boost + heatsink (sobrevivencia)...")
         _passo_evasivo()
 
-        if not pode_saltar_agora(debug=True):
-            print("[PLANO_FUGA] FSD indisponivel agora (mass lock ou hardpoints) -- so evasao nesta volta, sem tentar 'j'.")
-            continue
+        ja_a_carregar = bool(ler_telemetria(debug=True) & STATUS_FLAGS["FSD_CHARGING"])
 
-        print("[PLANO_FUGA] FSD disponivel -- a enviar 'j' + 'shiftright'...")
-        pydirectinput.press('j')
-        pydirectinput.press('shiftright')
-        time.sleep(1.5)
-
-        if bool(ler_telemetria(debug=True) & STATUS_FLAGS["FSD_CHARGING"]):
-            print("[PLANO_FUGA] FSD a carregar -- a confirmar Supercruise pela telemetria...")
-            logging.info(f"Plano de fuga: FSD confirmado a carregar na tentativa {tentativas}.")
-            if aguardar_supercruise_confirmado():
-                print("[PLANO_FUGA] Supercruise confirmado. Fuga bem sucedida.")
-                logging.info(f"Plano de fuga: sucesso na tentativa {tentativas} ({time.time()-inicio:.1f}s).")
-                return True
-            print("[AVISO] Supercruise nao confirmado apesar do FSD a carregar -- a repetir o ciclo.")
+        if ja_a_carregar:
+            print("[PLANO_FUGA] FSD já em carga (tentativa anterior) -- a não repetir 'j', só a monitorizar Supercruise...")
         else:
-            print("[AVISO] FSD nao confirmou carga apos 'j' -- a repetir o ciclo.")
+            if not pode_saltar_agora(debug=True):
+                print("[PLANO_FUGA] FSD indisponivel agora (mass lock ou hardpoints) -- so evasao nesta volta, sem tentar 'j'.")
+                continue
+
+            print("[PLANO_FUGA] FSD disponivel -- a enviar 'j' + 'shiftright'...")
+            pydirectinput.press('j')
+            pydirectinput.press('shiftright')
+            time.sleep(1.5)
+
+            if not bool(ler_telemetria(debug=True) & STATUS_FLAGS["FSD_CHARGING"]):
+                print("[AVISO] FSD nao confirmou carga apos 'j' -- a repetir o ciclo.")
+                continue
+
+            logging.info(f"Plano de fuga: FSD confirmado a carregar na tentativa {tentativas}.")
+
+        print("[PLANO_FUGA] FSD a carregar -- a confirmar Supercruise pela telemetria...")
+        if aguardar_supercruise_confirmado():
+            print("[PLANO_FUGA] Supercruise confirmado. Fuga bem sucedida.")
+            logging.info(f"Plano de fuga: sucesso na tentativa {tentativas} ({time.time()-inicio:.1f}s).")
+            return True
+        print("[AVISO] Supercruise nao confirmado apesar do FSD a carregar -- a repetir o ciclo (sem repetir 'j' enquanto continuar a carregar).")
 
     abortar_com_erro(f"Plano de fuga excedeu {LIMITE_FUGA}s sem conseguir reentrar em Supercruise ({tentativas} tentativas).")
 

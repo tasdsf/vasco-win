@@ -42,9 +42,19 @@ logging.basicConfig(
 )
 
 def abortar_com_erro(mensagem):
-    """ Regista o erro no log e dispara exit code 1 para o Orquestrador intercetar """
+    """ Regista o erro no log e dispara exit code 1 para o Orquestrador intercetar.
+    3x Backspace antes de sair -- sem isto a nave ficava presa a meio do
+    painel (Starport Services/fila de ícones) onde a falha aconteceu, em
+    vez de voltar ao ecrã principal para o próximo retry/etapa começar de
+    um estado conhecido. Mesmo padrão já usado em comprar.py (que tem uma
+    profundidade de menu semelhante); nem o Windows nem o Vasco-Nobara/
+    Linux tinham isto aqui -- gap confirmado nos dois lados, não é
+    regressão. """
     print(f"\n[FATAL] {mensagem}")
     logging.error(mensagem)
+    for _ in range(3):
+        pydirectinput.press('backspace')
+        time.sleep(0.8)
     sys.exit(1)
 
 NOME_JANELA = "R2D2 - Ocular de Auditoria"
@@ -98,6 +108,26 @@ def focar_jogo_seguro():
 # ==========================================
 MONITOR_MENU = {"top": 1100, "left": 1080, "width": 420, "height": 400}
 MONITOR_CORNER = {"top": 100, "left": 1900, "width": 370, "height": 280}
+
+# Fila de ícones (fuel/repair/ammo/farol de docagem) dentro do MONITOR_MENU
+# -- coordenadas relativas medidas ao vivo (2026-09-16, carrier Zahir).
+# Ícone do farol (4º) é para descer para o pad do carrier -- não interessa
+# aqui. Repair é o 2º, ammo é o 3º.
+FILA_ICONES_TOP_REL = 30
+FILA_ICONES_HEIGHT = 90
+ICONE_REPAIR_X_REL = (105, 210)
+ICONE_AMMO_X_REL = (210, 315)
+
+# Saturação HSV média medida ao vivo nos 4 ícones da fila (2026-09-16,
+# carrier Zahir): ~73 no ícone cinzento (repair, OK, não precisa reparar)
+# vs ~144-202 nos ícones coloridos/castanhos (ammo a precisar de reposição,
+# farol). Separação limpa -- generaliza estação/carrier sem depender de um
+# template de "estado" específico que pode ficar desatualizado: caso real
+# confirmado nesta conversa, o antigo 'no_ammo.png' (calibrado como "ícone
+# inativo, não precisa repor") batia a 0.944 num ícone de munição que na
+# verdade precisava de reposição -- o template validava o estado errado
+# para o render deste carrier.
+ICONE_SATURACAO_LIMIAR = 110
 
 STATUS_FILE = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Frontier Developments', 'Elite Dangerous', 'Status.json')
 ED_LOG_DIR = os.path.join(os.environ['USERPROFILE'], 'Saved Games', 'Frontier Developments', 'Elite Dangerous')
@@ -180,8 +210,44 @@ def procurar_template(template, nome_label, monitor, threshold=0.85, debug=False
             img_show = cv2.resize(img_bgr, (700, 600))
             cv2.imshow(NOME_JANELA, img_show)
             cv2.waitKey(1)
-        
+
         return encontrou, max_val
+
+def _icone_precisa_atencao(nome_label, x0_rel, x1_rel, debug=False):
+    """ Lê a fila de ícones (fuel/repair/ammo/farol) no MONITOR_MENU e
+    devolve True se o ícone na coluna [x0_rel:x1_rel] estiver colorido
+    (precisa de atenção -- Space depois de selecionado) em vez de cinzento
+    (OK, não precisa). Deteção por saturação HSV em vez de um template de
+    "estado" específico -- generaliza estação/carrier sem depender de uma
+    imagem calibrada só para um render (ver ICONE_SATURACAO_LIMIAR acima
+    para o caso real que motivou isto: 'no_ammo.png' tinha o estado
+    invertido para o carrier). """
+    with mss.mss() as sct:
+        monitors = sct.monitors
+        try:
+            monitor_jogo = monitors[1]
+        except IndexError:
+            monitor_jogo = monitors[0]
+        area_real = {
+            "top": monitor_jogo["top"] + MONITOR_MENU["top"] + FILA_ICONES_TOP_REL,
+            "left": monitor_jogo["left"] + MONITOR_MENU["left"] + x0_rel,
+            "width": x1_rel - x0_rel,
+            "height": FILA_ICONES_HEIGHT,
+        }
+        img_bgra = np.array(sct.grab(area_real))
+        img_bgr = cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR)
+
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    saturacao_media = float(hsv[:, :, 1].mean())
+    precisa_atencao = saturacao_media > ICONE_SATURACAO_LIMIAR
+
+    if debug:
+        marca = "COLORIDO" if precisa_atencao else "CINZENTO"
+        msg = f"[COR {marca}] {nome_label}: saturação média {saturacao_media:.1f} (limiar {ICONE_SATURACAO_LIMIAR})"
+        print(f"    {msg}")
+        logging.info(msg)
+
+    return precisa_atencao
 
 # ==========================================
 # 2b. TELEMETRIA E CONTEXTO (JOURNAL/STATUS)
@@ -352,24 +418,29 @@ def executar_auto_launch():
     # combustível, falta sempre alguma coisa) -- corre sempre às cegas, sem
     # template calibrado para a validar visualmente.
     #
-    # CRÍTICO: valida NEED-REPAIR e no_ammo ANTES de premir qualquer tecla,
-    # não depois do fuel -- NEED-REPAIR.png é o par gota+chave AMBOS ativos.
-    # Assim que se clica no fuel a gota muda de estado visualmente, e checar
-    # depois disso faz o match falhar mesmo com a chave ainda ativa (ver
-    # diagnóstico desta conversa: "a gota é validada e o need-repair falha").
-    # need_repair a 0.70 (match real de 0.96 num print de jogo, pré-fuel) --
-    # MATCH = precisa reparar.
+    # CRÍTICO: valida o estado de repair/ammo ANTES de premir qualquer
+    # tecla, não depois do fuel -- assim que se clica no fuel a gota muda
+    # de estado visualmente, e ler depois disso pode confundir-se com o
+    # ícone do fuel a mudar (ver diagnóstico desta conversa: "a gota é
+    # validada e o need-repair falha").
     #
-    # no_ammo.png é o INVERSO: captura o ícone de munições no estado
-    # INATIVO (não precisa reabastecer) -- por isso MATCH = não repor, e só
-    # se repõe munições quando este template NÃO dá match. Threshold 0.65 --
-    # match real de 0.68 num print onde o ícone do lápis (indicador de
-    # heatsinks, incluído no mesmo recorte) também estava inativo, o que
-    # baixa o score; 0.65 dá margem para esse estado sem deixar de exigir
-    # um match real.
-    print("\nA validar estado do painel (NEED-REPAIR / no_ammo) antes de qualquer tecla...")
-    need_repair, _ = procurar_template(templates['need_repair'], "NEED_REPAIR", MONITOR_MENU, 0.70, debug=True)
-    ammo_inativo, _ = procurar_template(templates['no_ammo'], "NO_AMMO (inativo = não precisa)", MONITOR_MENU, 0.65, debug=True)
+    # Repair e ammo são lidos por COR (saturação HSV do próprio ícone,
+    # ICONE_SATURACAO_LIMIAR acima) em vez de um template de "estado"
+    # fixo -- cinzento = OK, colorido/castanho = precisa de Space depois
+    # de selecionado. Substitui os antigos templates NEED-REPAIR.png/
+    # no_ammo.png para esta decisão: caso real confirmado nesta conversa
+    # (2026-09-16, carrier Zahir) em que 'no_ammo.png' (calibrado como
+    # "ícone inativo, não precisa repor") batia a 0.944 num ícone de
+    # munição que na verdade precisava de reposição -- o template validava
+    # o estado errado para este render (carrier, não estação). A deteção
+    # por cor generaliza aos dois contextos sem depender de recalibrar um
+    # template por cada variante de UI.
+    print("\nA validar estado do painel (repair/ammo por cor) antes de qualquer tecla...")
+    need_repair = _icone_precisa_atencao("REPAIR", *ICONE_REPAIR_X_REL, debug=True)
+    ammo_inativo = not _icone_precisa_atencao("AMMO", *ICONE_AMMO_X_REL, debug=True)
+    # Mantido só para confirmar que estamos no ecrã certo mais abaixo (ver
+    # comentário nesse bloco) -- não decide mais nada sobre reparação.
+    need_repair_template, _ = procurar_template(templates['need_repair'], "NEED_REPAIR (só confirmação de ecrã)", MONITOR_MENU, 0.70, debug=True)
     # Snapshot dedicado (nao sobrescrito pelas chamadas seguintes de
     # procurar_template, ao contrario de log_test) -- sem isto, uma corrida
     # bem sucedida nao deixava nenhuma evidencia visual de que
@@ -382,6 +453,16 @@ def executar_auto_launch():
     except Exception as e:
         print(f"[AVISO] Falha ao gravar snapshot de reabastecimento: {e}")
 
+    # Confirma que estamos mesmo no ecrã certo (fila de ícones fuel/repair/
+    # ammo) antes de avançar às cegas com o 3x 'w' + space -- portado do
+    # Vasco-Nobara/Linux. NEED_REPAIR (chave-inglesa+gota em laranja, já
+    # detetado acima) OU repair.png (chave-inglesa normal) têm de bater um
+    # dos dois; se nenhum bater, não há garantia de estarmos no ecrã certo.
+    if not need_repair_template:
+        repair_normal_ok, score_nao_reparar = procurar_template(templates['repair'], "REPAIR (validação ecrã)", MONITOR_MENU, 0.80, debug=True)
+        if not repair_normal_ok:
+            abortar_com_erro(f"Nem NEED-REPAIR nem repair.png detetados ({score_nao_reparar*100:.1f}%) -- ecrã errado, a rotina não deve prosseguir às cegas.")
+
     print("\nA reabastecer combustível: 3x 'w' + space...")
     for _ in range(3):
         pydirectinput.press('w')
@@ -391,8 +472,12 @@ def executar_auto_launch():
 
     if need_repair:
         print("A reparar (NEED-REPAIR detetado antes do fuel): 'd' + space...")
+        # 0.4s (era 0.2s) -- bug real já documentado e corrigido no
+        # Vasco-Nobara/Linux: com 0.2s entre o 'd' e o 'space', o cursor
+        # não tinha tido tempo de mudar de ícone (fuel -> repair) e o space
+        # confirmava fuel outra vez em vez de reparar.
         pydirectinput.press('d')
-        time.sleep(0.2)
+        time.sleep(0.4)
         pydirectinput.press('space')
         time.sleep(0.5)
 
@@ -452,22 +537,37 @@ def executar_auto_launch():
         falar("Auto launch not detected.")
         abortar_com_erro(f"Botão Auto-Launch não detetado (Match real: {score_al*100:.1f}% / Exigia {autolaunch_val*100}%)")
 
-    # Passo 5: Execução Limpa
+    # Passo 5: Execução Limpa, com confirmação de que o botão desapareceu --
+    # portado do Vasco-Nobara/Linux: um pydirectinput.press pode falhar em
+    # silêncio, e sem confirmar que o botão reagiu nunca saberíamos. Até 3
+    # tentativas de Space, confirmando entre cada uma que o Auto-Launch
+    # deixou de estar visível.
     print("\n>>> TUDO VALIDADO! A disparar comando SPACE...")
-    pydirectinput.press('space')
+    for tentativa in range(3):
+        pydirectinput.press('space')
+        time.sleep(1.0)
+        ainda_visivel, _ = procurar_template(templates['autolaunch'], "VAL_AUTO_LAUNCH_POS", MONITOR_MENU, autolaunch_val, debug=True)
+        if not ainda_visivel:
+            break
+        print(f"[AVISO] Botão Auto-Launch ainda visível após o SPACE (tentativa {tentativa+1}/3). A repetir...")
+    else:
+        print("[AVISO] Auto-Launch pode não ter disparado após 3 tentativas -- a prosseguir mesmo assim.")
+
     return True
 
 def aguardar_saida_estacao():
     print("\n>>> FASE: Detetar saída da estação...")
     print("[VISÃO] A monitorizar o HUD para a notificação 'AUTO LAUNCH COMPLETE'...")
-    
-    # Watchdog de 3 Minutos (A estação pode ter fila de trânsito)
-    timeout_saida = time.time() + 180  
-    
-    while True: 
+
+    # Watchdog de 9 Minutos (era 3 -- portado do Vasco-Nobara/Linux, que
+    # documenta 180s como curto demais e a dar timeout em falso com a nave
+    # ainda genuinamente em fila de trânsito).
+    timeout_saida = time.time() + 540
+
+    while True:
         if time.time() > timeout_saida:
             falar("Warning. Auto launch timeout exceeded.")
-            abortar_com_erro("Timeout (180s) à espera de sair da estação. A nave está presa no trânsito?")
+            abortar_com_erro("Timeout (540s) à espera de sair da estação. A nave está presa no trânsito?")
 
         encontrou, score = procurar_template(templates['auto_complete'], "AUTO_COMPLETE", MONITOR_CORNER, 0.7)
         if encontrou:

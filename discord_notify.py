@@ -21,24 +21,16 @@ except Exception:
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 HOST_ID = os.environ.get("VASCO_HOST_ID", "vasco-r2d2-win")
 
-def notificar_erro_discord(origem, mensagem, imagem_path=None):
-    """ Envia uma notificação de erro para o Discord via webhook (URL em
-    DISCORD_WEBHOOK_URL, ver .env). Best-effort -- nunca deve derrubar o
-    chamador: qualquer falha (webhook não configurado, sem rede, timeout)
-    fica só registada na consola, nunca levanta exceção.
-
-    origem       -- identifica o script/etapa que falhou (ex:
-                     "supercruise_assist.py").
-    mensagem     -- texto do erro.
-    imagem_path  -- caminho opcional de um PNG a anexar; se não existir,
-                     envia só o texto. """
+def _enviar_discord(content, imagem_path=None):
+    """ Envia `content` (já formatado) para o webhook em DISCORD_WEBHOOK_URL.
+    Best-effort -- nunca levanta exceção, qualquer falha fica só registada na
+    consola. Usado por notificar_erro_discord() e notificar_sucesso_discord(). """
     if not DISCORD_WEBHOOK_URL:
         print("[DISCORD] DISCORD_WEBHOOK_URL não definido -- notificação não enviada.")
         return False
     try:
         import requests
         LIMITE_CONTENT_DISCORD = 2000  # limite rigido da API do Discord para "content"
-        content = f"🔴 **[{HOST_ID}] {origem}**\n{mensagem}"
         if len(content) > LIMITE_CONTENT_DISCORD:
             sufixo = "\n… (truncado)"
             content = content[:LIMITE_CONTENT_DISCORD - len(sufixo)] + sufixo
@@ -60,3 +52,36 @@ def notificar_erro_discord(origem, mensagem, imagem_path=None):
     except Exception as e:
         print(f"[DISCORD] Falha ao enviar notificação: {e}")
         return False
+
+def notificar_erro_discord(origem, mensagem, imagem_path=None):
+    """ Envia uma notificação de erro para o Discord via webhook (URL em
+    DISCORD_WEBHOOK_URL, ver .env). Best-effort -- nunca deve derrubar o
+    chamador: qualquer falha (webhook não configurado, sem rede, timeout)
+    fica só registada na consola, nunca levanta exceção.
+
+    origem       -- identifica o script/etapa que falhou (ex:
+                     "supercruise_assist.py").
+    mensagem     -- texto do erro.
+    imagem_path  -- caminho opcional de um PNG a anexar; se não existir,
+                     envia só o texto. """
+    return _enviar_discord(f"🔴 **[{HOST_ID}] {origem}**\n{mensagem}", imagem_path)
+
+def notificar_sucesso_discord(origem, mensagem):
+    """ Envia uma notificação de sucesso para o Discord via webhook (mesmo
+    canal/formato de notificar_erro_discord, com ✅ em vez de 🔴). Best-effort,
+    mesmas garantias de não-exceção.
+
+    origem       -- identifica o script/etapa (ex: "vender.py").
+    mensagem     -- texto da confirmação. """
+    return _enviar_discord(f"✅ **[{HOST_ID}] {origem}**\n{mensagem}")
+
+def notificar_info_discord(origem, mensagem):
+    """ Envia uma notificação informativa/neutra para o Discord via webhook
+    (mesmo canal/formato de notificar_erro_discord, com ⏸️ em vez de 🔴) --
+    para estados que não são erro nem sucesso, ex.: uma pausa planeada
+    (espera pela janela de LOS). Best-effort, mesmas garantias de
+    não-exceção.
+
+    origem       -- identifica o script/etapa (ex: "vasco.py").
+    mensagem     -- texto do aviso. """
+    return _enviar_discord(f"⏸️ **[{HOST_ID}] {origem}**\n{mensagem}")

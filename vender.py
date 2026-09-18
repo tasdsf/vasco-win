@@ -12,6 +12,7 @@ import pyttsx3
 import pygetwindow as gw
 import time
 from datetime import datetime as _dt_hora
+from discord_notify import notificar_sucesso_discord
 
 # Todos os prints passam a ter timestamp HH:MM:SS (preserva "\n" iniciais
 # usados para espaçamento visual no terminal).
@@ -351,6 +352,8 @@ def fase_2_vender_tudo():
                     return "FALHA_CONFIRMACAO"
 
                 _logger.info("Venda concluida com sucesso -- VENDIDO (confirmada pelo journal).")
+                print("[SUCESSO] Venda concluída com sucesso.")
+                notificar_sucesso_discord("vender.py", "Venda concluída com sucesso.")
                 falar("Sales operation completed commander. The cargo bay is empty.")
                 return "VENDIDO"
 

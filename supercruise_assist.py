@@ -9,6 +9,7 @@ import sys
 import json
 import glob
 import time
+import subprocess
 import logging
 import pydirectinput
 import cv2
@@ -43,7 +44,7 @@ logging.basicConfig(
 # [SUPERCRUISE], nível INFO) que fica ativa.
 import plano_fuga
 import olho
-from leg_state import leg_esta_limpa
+from leg_state import leg_esta_limpa, marcar_leg_suja
 
 def _capturar_screenshot_erro():
     """ Grava o ecrã inteiro do jogo em logs/erro_<timestamp>.png -- dá
@@ -202,6 +203,14 @@ TEMPLATES_NOMES = {
     'unlocked': 'UNLOCKED_DESTINATION.png',
     'assist_active': 'SUPERCRUISE_ASSIST_ACTIVE.png',
     'align_warning': 'SUPERCRUISE_ASSIST_INACTIVE.png',
+    # Banner "MOVE TO OBTAIN LINE OF SIGHT TO TARGET" -- oclusão de LOS real
+    # vista a meio do voo (não é o pré-undocking, esse já é tratado por
+    # los_checker.calcular_espera_los() em vasco.py antes de descolar). Ver
+    # _tratar_los_detetado_em_voo(). Recorte (texto + triângulo vermelho) de
+    # images/line_of_sight.png (screenshot de referência original, mantido
+    # intacto) -- o ficheiro original é o ecrã inteiro, inutilizável como
+    # template de matchTemplate diretamente.
+    'line_of_sight': 'line_of_sight_banner.png',
     # 'Dois triangulos azuis' que aparecem um pouco acima do aviso de
     # desalinhamento quando o alvo fica travado -- carregado mas ja nao
     # usado por nenhuma funcao (engatar_assist_e_alinhar deixou de depender
@@ -212,6 +221,12 @@ TEMPLATES_NOMES = {
     # -- usados em engatar_assistencia_menu() para confirmar o alvo certo.
     'zahir_confirm': 'zahir_target_confirm.png',
     'futen_confirm': 'futen_target_confirm.png',
+    # Título "NAV BEACON" do popup -- rejeição EXPLÍCITA, não só "não é
+    # Zahir/Futen" (título ambíguo, ex.: 0.42 podia ser qualquer coisa).
+    # Diz sem ambiguidade qual foi o alvo errado, e dispara uma recuperação
+    # diferente (ver engatar_assistencia_menu(), Fase B). Separação limpa
+    # confirmada: 1.000/0.998 no Nav Beacon genuíno, 0.389 no Futen.
+    'nav_beacon_confirm': 'nav_beacon_confirm.png',
     # Nome do alvo destacado NA LISTA, entre '< >' (ex.: "< ZAHIR W6G-26N >")
     # -- confirma que a linha certa está mesmo selecionada ANTES de premir
     # 'space' para abrir o popup de confirmação. Padrão adotado depois de
@@ -222,6 +237,35 @@ TEMPLATES_NOMES = {
     # linha errada (ou nenhuma) selecionada.
     'zahir_selected': 'carrier_selected.png',
     'futen_selected': 'futen_selected.png',
+    # Terceira aparência real da linha do Zahir: destaque AMARELO cheio,
+    # mas SEM '< >' (diferente do cursor com brackets E do "trancado sem
+    # cursor" em tom oliva) -- visto ao vivo quando a lista reordena por
+    # distância e o Zahir passa a ser a linha mais próxima. Testado: 1.000
+    # no estado certo, 0.85-0.86 contra os OUTROS dois estados do Zahir
+    # (esperado, são todos "é o Zahir"), 0.55-0.56 contra Futen/Nav Beacon
+    # (bem separado). Só temos o recorte do Zahir por agora.
+    'zahir_highlight_sem_cursor': 'zahir_highlight_sem_cursor.png',
+    # Quarta aparência real: cursor COM '< >' mas fundo VERDE em vez de
+    # amarelo (visto ao vivo 2026-09-15 22:5x, lista reordenada de novo,
+    # Zahir na última linha). O template 'zahir_selected' (fundo amarelo)
+    # só bate a 0.796 aqui -- abaixo do limiar -- confirmando que a cor de
+    # fundo muda por si só e não é coberta pelo template amarelo. Testado
+    # em escala de cinza também (0.791, sem melhoria -- não é só questão
+    # de cor, a própria renderização difere o suficiente para precisar de
+    # recorte próprio). Separação limpa: 1.000 no estado certo, 0.53-0.57
+    # em Futen/Nav Beacon.
+    'zahir_verde_brackets': 'zahir_verde_com_brackets.png',
+    # Nome do alvo JÁ TRANCADO na lista, mas SEM o cursor lá (sem '< >',
+    # fundo em tom diferente do amarelo do cursor -- ex.: "ZAHIR W6G-26N"
+    # verde/oliva enquanto o cursor está noutra linha). Estado distinto do
+    # anterior: '< NOME >' confirma "o cursor está aqui", isto confirma "o
+    # destino já está trancado", independente de onde o cursor esteja.
+    # Testado contra os dois: match ~0.64 no estado com cursor (não é o
+    # mesmo estado, por isso não confunde os dois), ~1.0 no estado
+    # correto, ~0.46-0.50 nas outras linhas da lista (Futen/Nav Beacon).
+    # Só temos o recorte do Zahir por agora -- 'futen_locked' fica por
+    # calibrar até haver um print real desse estado para a estação.
+    'zahir_locked': 'zahir_locked_sem_cursor.png',
     # Ícone '<>' do botão lock/unlock, recortado só ao ícone (sem o texto
     # "LOCK DESTINATION"/"UNLOCK DESTINATION" ao lado, que muda consoante o
     # destino já estar trancado ou não -- confirmado em jogo real que tanto
@@ -239,6 +283,12 @@ TEMPLATES_NOMES = {
     # confirmação negativa não garante que o foco foi parar ao botão certo,
     # só que saiu do errado).
     'assist_toggle': 'assist_togle_button.png',
+    # Legenda "DEACTIVATE SUPERCRUISE ASSIST" (só a palavra "DEACTIVATE",
+    # que fica em branco no estado desligado) -- verdade do jogo sobre o
+    # estado do toggle, sem ambiguidade de foco/banner. Ver uso em
+    # engatar_assistencia_menu() -- decide se o Space ativa ou desativa, e
+    # confirma o resultado a seguir.
+    'deactivate_assist': 'deactivate_supercruise_assist.png',
 }
 
 templates = {}
@@ -272,7 +322,22 @@ def procurar_template(template, nome_label, monitor, threshold=0.75, debug=False
 
         if debug:
             marca = "OK" if encontrou else "--"
-            print(f"    [MATCH {marca}] {nome_label}: {max_val:.3f} (limiar {threshold:.2f})")
+            # Inclui max_loc (onde o match aterrou) -- sem isto não dava
+            # para saber se um match alto estava mesmo em cima do texto
+            # esperado ou coincidia por acaso noutro sítio da imagem.
+            # Pedido direto do utilizador desta conversa depois de um
+            # falso positivo nunca ter sido confirmado visualmente (só se
+            # testaram screenshots de outro instante, não o frame real do
+            # match).
+            msg_match = f"[MATCH {marca}] {nome_label}: {max_val:.3f} (limiar {threshold:.2f}) em {max_loc}"
+            print(f"    {msg_match}")
+            # Persiste no r2d2_combined.log, não só na consola -- os scores
+            # de debug=True só existiam ao vivo no terminal e desapareciam
+            # com o processo, tornando impossível analisar depois um caso
+            # de falha real sem repetir a corrida. Pedido explícito do
+            # utilizador desta conversa após um caso de ambiguidade na
+            # legenda do Assist sem evidência suficiente para diagnosticar.
+            logging.info(msg_match)
 
         if VISUAL_DEBUG:
             cor = (0, 255, 0) if encontrou else (0, 0, 255)
@@ -315,6 +380,41 @@ def ler_destino_telemetria(debug=False):
     except Exception as e:
         if debug:
             print(f"    [DESTINO] Falha a ler {STATUS_FILE}: {e}")
+        return None
+
+def ler_cargo_telemetria(debug=False):
+    try:
+        with open(STATUS_FILE, 'r', encoding='utf-8') as f:
+            cargo = json.load(f).get("Cargo", 0)
+            if debug:
+                print(f"    [CARGA] {cargo}")
+            return cargo
+    except Exception as e:
+        if debug:
+            print(f"    [CARGA] Falha a ler {STATUS_FILE}: {e}")
+        return 0
+
+def obter_sistema_atual():
+    """ Lê o Journal mais recente e devolve o StarSystem atual -- mesma
+    deteção já usada em los_checker.py::obter_sistema_atual(), duplicada
+    aqui por convenção do projeto (scripts Windows não partilham imports
+    entre si). Usada só como fallback quando a telemetria de destino falha
+    (ver ausência de 'Destination' em engatar_assistencia_menu()). """
+    ultimo_log = get_latest_log()
+    if not ultimo_log:
+        return None
+    try:
+        sistema = None
+        with open(ultimo_log, 'r', encoding='utf-8') as f:
+            for linha in f:
+                try:
+                    data = json.loads(linha)
+                    if data.get("event") in ("FSDJump", "Location", "CarrierJump") and "StarSystem" in data:
+                        sistema = data["StarSystem"]
+                except Exception:
+                    continue
+        return sistema
+    except Exception:
         return None
 
 def _registar_los_se_perna_limpa():
@@ -472,6 +572,212 @@ def registar_los_visivel_auto():
         print(f"[LOS-AUTO] Falha ao registar observação (ignorada, o voo continua): {e}")
 
 # ==========================================
+# 2c. OCLUSÃO DE LOS DETETADA A MEIO DO VOO
+# ==========================================
+# Duplicado de vasco.py::EXIT_CODE_ESTADO_SOBRESCRITO (mesmo valor, mesmo
+# significado) -- convenção do projeto de duplicar constantes/pequenos
+# helpers partilhados em vez de importar entre scripts Windows (ver
+# comentários "duplicada aqui por convenção do projeto" já usados neste
+# ficheiro). O main() de vasco.py trata este exit code como "o filho já
+# reescreveu vasco_state.json sozinho", não como sucesso nem falha normal.
+EXIT_CODE_ESTADO_SOBRESCRITO = 42
+
+LOS_DIAG_DIR = os.path.join(PROJECT_DIR, "logs", "los")
+VASCO_STATE_FILE = os.path.join(PROJECT_DIR, "logs", "vasco_state.json")
+
+def _capturar_screenshot_los():
+    """ Grava o ecrã inteiro do jogo em logs/los/<timestamp>.png -- prova
+    visual de cada deteção real do banner "MOVE TO OBTAIN LINE OF SIGHT TO
+    TARGET" a meio do voo (pasta nova pedida pelo utilizador, separada de
+    logs/diag_assist/ e de logs/erro_*.png porque isto não é um erro nem um
+    passo de engatar_assistencia_menu()). Best-effort. """
+    try:
+        os.makedirs(LOS_DIAG_DIR, exist_ok=True)
+        caminho = os.path.join(LOS_DIAG_DIR, f"{time.strftime('%Y%m%d_%H%M%S')}.png")
+        with mss.mss() as sct:
+            try:
+                monitor_jogo = sct.monitors[1]
+            except Exception:
+                monitor_jogo = sct.monitors[0]
+            img_bgra = np.array(sct.grab(monitor_jogo))
+            cv2.imwrite(caminho, cv2.cvtColor(img_bgra, cv2.COLOR_BGRA2BGR))
+        print(f"[LOS-VOO] Screenshot gravado em {caminho}")
+        return caminho
+    except Exception as e:
+        print(f"[LOS-VOO] Falha ao gravar screenshot (ignorada): {e}")
+        return None
+
+def _registar_los_ocluso_auto(sistema):
+    """ Regista na BD partilhada uma observação 'oclusos' automática --
+    mesma ligação/tabela de registar_los_visivel_auto(), mas origem
+    'auto-win' (fica de fora do ajuste de fase/período em los_checker.py,
+    tal como as 'visivel' automáticas -- decisão do utilizador: só
+    observações manuais 'win'/'linux' calibram o modelo). Serve para
+    auditoria/histórico, não para recalibrar sozinha.
+    NUNCA pode parir o voo -- qualquer falha é só reportada. """
+    try:
+        from datetime import datetime, timezone
+        from dotenv import load_dotenv
+        import psycopg2
+
+        load_dotenv(os.path.join(PROJECT_DIR, ".env"))
+        host = os.environ.get("R2D2_DB_HOST")
+        if not host:
+            return
+
+        conn = psycopg2.connect(
+            host=host,
+            port=os.environ.get("R2D2_DB_PORT", "5432"),
+            dbname=os.environ.get("R2D2_DB_NAME", "ED"),
+            user=os.environ.get("R2D2_DB_USER", "r2d2"),
+            connect_timeout=4,
+        )
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO los_observacoes (sistema, timestamp_utc, estado, nota, origem) "
+                    "VALUES (%s, %s, %s, %s, %s);",
+                    (sistema, datetime.now(timezone.utc), "oclusos",
+                     "automatica: banner 'MOVE TO OBTAIN LINE OF SIGHT TO TARGET' visto "
+                     "a meio do voo em modo auto, perna limpa (sem erros/retries)",
+                     "auto-win"))
+        finally:
+            conn.close()
+        print(f"[LOS-VOO] Observação 'oclusos' registada na BD para '{sistema}'.")
+    except Exception as e:
+        print(f"[LOS-VOO] Falha ao registar observação (ignorada, o voo continua): {e}")
+
+def _voltar_para_origem_por_oclusao_los():
+    """ Chamada quando o banner de LOS foi visto a meio do voo E
+    los_checker.calcular_espera_los() confirma oclusão agora -- vira a nave
+    para trás em vez de continuar rumo a um destino que sabemos estar
+    bloqueado.
+
+    Direção: lida de VASCO_STEP_NUMBER (posta por vasco.py no ambiente do
+    subprocesso, ver executar_script()) -- '4' = a caminho do carrier
+    (voltar para a ESTAÇÃO), '9' = a caminho da estação (voltar para o
+    CARRIER). Sem esta variável (ex.: script corrido à mão, fora do vasco.py)
+    não há como saber a direção em segurança -- aborta em vez de adivinhar.
+
+    Reescreve vasco_state.json com o 'last_step' que faz o PRÓXIMO passo
+    (o mesmo script SUPERCRUISE, com o alvo já trocado) apontar para a
+    origem, e sai com EXIT_CODE_ESTADO_SOBRESCRITO para o vasco.py recarregar
+    o estado em vez de tratar isto como sucesso ou falha normal:
+      - a caminho do carrier (step 4) -> volta à ESTAÇÃO -> last_step=8
+        (o próximo passo reaproveita o SUPERCRUISE da etapa 9, que já
+        termina em DOCKING(estação), etapa 10 -- é o mesmo raciocínio do
+        step 9 original, só que sem ter passado por VENDER/SELECT_STATION;
+        o porão continua com o item comprado, por isso o ciclo seguinte a
+        partir da etapa 1 (COMPRAR) já salta a compra -- ver
+        comprar.py::validar_porao_antes_de_comprar()).
+      - a caminho da estação (step 9) -> volta ao CARRIER -> last_step=3
+        (reaproveita o SUPERCRUISE da etapa 4, termina em DOCKING(carrier),
+        etapa 5; o porão continua vazio do item, undocking.py::
+        validar_carga_antes_de_descolar() já exige isso para descolar do
+        carrier, por isso o fluxo normal de VENDER na etapa 6 segue sem
+        alterações -- não há nada para vender ainda, mas essa etapa não
+        assume que há). """
+    passo_atual = os.environ.get("VASCO_STEP_NUMBER")
+    if passo_atual == "4":
+        alvo_regresso, novo_last_step, nome_alvo = "station", 8, "ESTAÇÃO"
+    elif passo_atual == "9":
+        alvo_regresso, novo_last_step, nome_alvo = "carrier", 3, "CARRIER"
+    else:
+        abortar_com_erro(
+            f"Oclusão de LOS confirmada a meio do voo, mas VASCO_STEP_NUMBER "
+            f"('{passo_atual}') não é '4' nem '9' -- não é seguro adivinhar a "
+            f"direção do regresso. Intervenção manual necessária."
+        )
+
+    print(f"\n>>> LOS-VOO: a virar a nave para trás, rumo a {nome_alvo}...")
+    logging.info(f"LOS-VOO: oclusao confirmada, a voltar para {nome_alvo} (VASCO_STEP_NUMBER={passo_atual}).")
+
+    # Troca o alvo de navegação para a origem -- select_target.py corrido
+    # como subprocesso (mesmo padrão de invocação usado por vasco.py),
+    # forçado via VASCO_FORCE_TARGET porque a deteção dinâmica normal desse
+    # script olha para o Undocked/Docked mais recente e aponta sempre para a
+    # FRENTE (a mesma direção de onde a nave já vem) -- nunca para trás.
+    env_alvo = os.environ.copy()
+    env_alvo["VASCO_FORCE_TARGET"] = alvo_regresso
+    resultado_alvo = subprocess.run(
+        [sys.executable, "-u", os.path.join(PROJECT_DIR, "select_target.py")],
+        env=env_alvo, timeout=60,
+    )
+    if resultado_alvo.returncode != 0:
+        abortar_com_erro(
+            f"Falha ao trocar o alvo de navegação para {nome_alvo} durante o "
+            f"regresso por oclusão de LOS (select_target.py saiu com código "
+            f"{resultado_alvo.returncode}). Intervenção manual necessária."
+        )
+
+    # Reescreve vasco_state.json -- só o 'last_step', mantém
+    # 'completed_steps' como está (é só um contador de exibição, e as
+    # etapas já percorridas nesta viagem para a frente continuam
+    # genuinamente concluídas).
+    try:
+        with open(VASCO_STATE_FILE, 'r', encoding='utf-8') as f:
+            estado = json.load(f)
+    except Exception:
+        estado = {"completed_steps": []}
+    estado["last_step"] = novo_last_step
+    estado["success"] = True
+    estado["error"] = f"Regresso a {nome_alvo} por oclusao de LOS confirmada a meio do voo."
+    with open(VASCO_STATE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(estado, f, indent=2)
+    print(f"[LOS-VOO] vasco_state.json atualizado: last_step={novo_last_step} (próximo passo reaproveita o SUPERCRUISE rumo a {nome_alvo}).")
+    logging.info(f"LOS-VOO: vasco_state.json last_step={novo_last_step}.")
+
+    sys.exit(EXIT_CODE_ESTADO_SOBRESCRITO)
+
+def _tratar_los_detetado_em_voo():
+    """ Chamada quando o template 'line_of_sight' bate no HUD durante
+    engatar_assist_e_alinhar() -- uma oclusão de LOS REAL vista a meio do
+    voo (distinto do gate pré-undocking em vasco.py, que usa
+    calcular_espera_los() antes de sequer descolar).
+
+    Só regista/age se a perna atual estiver limpa (leg_esta_limpa(), ver
+    leg_state.py) -- sem erros/retries, sem intervenção manual, sem plano de
+    fuga acionado nesta perna -- para não contaminar a prova com um caso
+    ambíguo. Cruza com los_checker.calcular_espera_los() (o mesmo modelo
+    orbital usado no gate pré-undocking):
+      - Se o modelo TAMBÉM prevê oclusão agora -> confirmado, regista a
+        observação e vira a nave para trás.
+      - Se o modelo prevê livre -> divergência do modelo real vs previsto,
+        aborta e pede ajuda humana em vez de tentar adivinhar/corrigir
+        sozinho. """
+    if not leg_esta_limpa():
+        print("[LOS-VOO] Banner de LOS visto, mas perna com erro/retry -- não é uma "
+              "medição independente, a ignorar (sem registo nem regresso automático).")
+        return
+
+    print("\n[LOS-VOO] Banner 'MOVE TO OBTAIN LINE OF SIGHT TO TARGET' detetado a meio do voo (perna limpa).")
+    logging.warning("LOS-VOO: banner de oclusao detetado a meio do voo (perna limpa).")
+    _capturar_screenshot_los()
+
+    sistema = obter_sistema_atual()
+    if not sistema:
+        abortar_com_erro("Banner de oclusão de LOS visto a meio do voo, mas sistema atual "
+                          "desconhecido (Journal ilegível) -- não é seguro cruzar com "
+                          "los_checker nem decidir a direção do regresso. Intervenção manual necessária.")
+
+    _registar_los_ocluso_auto(sistema)
+
+    from los_checker import calcular_espera_los
+    espera_prevista = calcular_espera_los(sistema=sistema)
+    if espera_prevista and espera_prevista > 0:
+        print(f"[LOS-VOO] los_checker CONFIRMA oclusão agora (espera prevista {espera_prevista:.0f}s) -- modelo e realidade batem certo.")
+        logging.info(f"LOS-VOO: los_checker confirma oclusao (espera={espera_prevista:.0f}s).")
+        _voltar_para_origem_por_oclusao_los()
+    else:
+        abortar_com_erro(
+            "Banner de oclusão de LOS visto ao vivo a meio do voo, mas "
+            "los_checker.calcular_espera_los() NÃO prevê oclusão agora para "
+            f"'{sistema}' -- divergência entre o modelo e a realidade "
+            "(possível falha de calibração). Intervenção manual necessária, "
+            "NÃO a corrigir sozinho às cegas."
+        )
+
+# ==========================================
 # 3. FASE 0: SALTO E TELEMETRIA
 # ==========================================
 def iniciar_salto_seguro():
@@ -616,8 +922,22 @@ def assist_ja_ativo():
     ligado -- 'assist_active' (ligado e a apontar para o alvo) ou
     'align_warning'/SUPERCRUISE_ASSIST_INACTIVE.png (ligado mas ainda
     desalinhado do alvo -- apesar do nome do ficheiro, esta imagem só
-    aparece com o assist LIGADO, não desligado). Só a ausência de ambas
-    significa que o assist está mesmo desligado. """
+    aparece com o assist LIGADO, não desligado). É importante não confiar só
+    num dos dois templates aqui: D+Space dentro do painel é um TOGGLE, e um
+    falso negativo neste early-return (assist já ligado, mas nenhum destes
+    sinais detetado nesse instante) manda o código abrir o painel e
+    DESLIGAR o que já estava a funcionar.
+
+    NÃO usar o retículo do HUD (olho.localizar_alvo_hud) aqui como terceiro
+    sinal -- foi tentado e revertido: prova real em log (2026-09-16 03:16:04)
+    mostrou os dois templates acima a falhar (0.400 e 0.683, ambos abaixo do
+    limiar) e mesmo assim este early-return disparou, saltando a FASE 1
+    inteira (nunca abriu o menu 1, nunca tentou o D+Space) e entrando direto
+    no loop de alinhamento a acreditar que o Assist já estava ligado quando
+    na verdade nunca tinha sido ativado -- confirmado pelo IMPULSO_HUD nos
+    logs do utilizador (o retículo aparece sempre que há alvo trancado no
+    HUD, LIGADO ou DESLIGADO o Assist, não é um sinal exclusivo do Assist
+    como se assumiu antes). """
     return (procurar_template(templates['assist_active'], "ASSIST ACTIVE (pré-toggle)", MONITOR_CENTER, 0.75, debug=True)
             or procurar_template(templates['align_warning'], "ASSIST LIGADO MAS DESALINHADO (pré-toggle)", MONITOR_CENTER, 0.82, debug=True))
 
@@ -654,15 +974,54 @@ def engatar_assistencia_menu():
     # outras deste ficheiro).
     destino = ler_destino_telemetria(debug=True)
     destino_nome = (destino.get("Name") if destino else None) or ""
+
+    if not destino_nome:
+        # Telemetria não reportou nenhum destino trancado -- glitch real
+        # confirmado em produção (2026-09-15 20:19): o campo 'Destination'
+        # do Status.json apareceu vazio já em Supercruise, mesmo tendo
+        # sido trancado antes do salto para lá chegarmos. Em vez de
+        # avançar sem sequer saber que alvo esperar, infere pelo mesmo
+        # critério de negócio já usado em
+        # undocking.py::validar_carga_antes_de_descolar(): com carga a
+        # bordo vamos para o carrier (a venda ainda não aconteceu); sem
+        # carga vamos para a estação (a compra já aconteceu) -- Futen se o
+        # sistema atual for Fujin, Hammel Terminal se for Kamitra.
+        cargo_atual = ler_cargo_telemetria(debug=True)
+        sistema_atual = obter_sistema_atual()
+        if cargo_atual and cargo_atual > 0:
+            destino_nome = "ZAHIR"
+        elif sistema_atual == "Kamitra":
+            destino_nome = "HAMMEL TERMINAL"
+        else:
+            destino_nome = "FUTEN SPACEPORT"  # default: Fujin, ou sistema desconhecido
+        msg_inferido = (f"Destino ausente da telemetria -- inferido por contexto "
+                         f"(carga={cargo_atual}, sistema={sistema_atual or 'desconhecido'}) -> '{destino_nome}'.")
+        print(f"[AVISO] {msg_inferido}")
+        logging.info(f"engatar_assistencia_menu: {msg_inferido}")
+
     if "ZAHIR" in destino_nome.upper():
         template_alvo, nome_alvo = templates['zahir_confirm'], "ZAHIR"
         template_selecionado = templates['zahir_selected']
+        # A linha em destaque com '< >' parece alternar (pulsar?) entre
+        # fundo amarelo (zahir_selected) e fundo verde -- confirmado ao
+        # vivo (2026-09-15 22:5x): carrier_selected.png bate a 0.92 num
+        # instante e só 0.796 segundos depois, na MESMA linha, só porque a
+        # cor de fundo mudou. Lista de variantes extra em vez de um único
+        # 'alt' -- já vamos em duas, mais fácil de continuar a somar do
+        # que trocar a estrutura outra vez da próxima vez que aparecer uma
+        # variante nova.
+        templates_selecionado_extra = [templates['zahir_highlight_sem_cursor'], templates['zahir_verde_brackets']]
+        template_locked_sem_cursor = templates['zahir_locked']
     elif "FUTEN" in destino_nome.upper():
         template_alvo, nome_alvo = templates['futen_confirm'], "FUTEN SPACEPORT"
         template_selecionado = templates['futen_selected']
+        templates_selecionado_extra = []  # ainda sem recortes calibrados para estes estados na estação
+        template_locked_sem_cursor = None  # ainda sem recorte calibrado para este estado na estação
     else:
         template_alvo, nome_alvo = None, None
         template_selecionado = None
+        templates_selecionado_extra = []
+        template_locked_sem_cursor = None
         print(f"[AVISO] Destino '{destino_nome}' não reconhecido (nem Zahir nem Futen) -- validação de alvo desativada nesta fase.")
 
     # Sessão de diagnóstico (logs/diag_assist/<timestamp>/) -- passos 1
@@ -715,7 +1074,37 @@ def engatar_assistencia_menu():
     falhas_popup = 0
     MAX_FALHAS_LISTA = 3
     MAX_FALHAS_POPUP = 5
-    alvo_confirmado = (template_alvo is None)  # sem template conhecido -> nao bloqueia, so nao valida
+
+    if template_alvo is None:
+        # Sem template conhecido para validar visualmente (nome não
+        # reconhecido, ex.: Hammel Terminal em Kamitra, ainda sem
+        # templates calibrados) -- não dá para confirmar o título nem a
+        # linha da lista, mas o 'Space' que seleciona o destino
+        # pré-realçado continua a ser necessário. Sem isto,
+        # 'alvo_confirmado' ficava True de imediato e o código avançava
+        # direto para o loop do 'D' sem NUNCA ter aberto o ecrã de info de
+        # nenhum destino -- bug real confirmado em produção (2026-09-15
+        # 20:19, destino ausente da telemetria antes deste fallback
+        # existir): 3x 'D' enviados para a lista genérica, nunca para o
+        # ecrã certo, painel fechou-se sozinho.
+        print(f"[AVISO] Sem template para validar '{nome_alvo or destino_nome}' -- a selecionar (Space) sem confirmar visualmente.")
+        pydirectinput.press('space')
+        time.sleep(1.0)
+        alvo_confirmado = True
+    elif template_locked_sem_cursor is not None and procurar_template(template_locked_sem_cursor, f"{nome_alvo} JÁ TRANCADO (sem cursor)", MONITOR_PANEL, 0.85, debug=True):
+        # O destino já aparece trancado na lista (nome sem '< >', cor
+        # diferente do cursor) mesmo sem o cursor estar em cima dele --
+        # sinal direto do próprio painel de que já está selecionado, mais
+        # fiável do que a telemetria (Destination) que falhou e nos trouxe
+        # até aqui. Não faz sentido navegar o cursor até lá e premir
+        # 'Space' outra vez: 'Space'/'D'+'Space' são TOGGLE, e mexer no que
+        # já está trancado corretamente arrisca desfazê-lo. Salta direto
+        # para o loop do 'D' (ativar o Assist).
+        print(f"[OK] '{nome_alvo}' já aparece trancado na lista (sem cursor lá) -- a saltar seleção/Space, direto para o Assist.")
+        logging.info(f"engatar_assistencia_menu: '{nome_alvo}' já trancado (detetado sem cursor na lista) -- seleção saltada de propósito.")
+        alvo_confirmado = True
+    else:
+        alvo_confirmado = False
 
     while not alvo_confirmado:
         time.sleep(1)
@@ -733,7 +1122,58 @@ def engatar_assistencia_menu():
         # Backspace da tentativa anterior).
         if template_selecionado is not None:
             time.sleep(1.5)
-            linha_selecionada = procurar_template(template_selecionado, f"{nome_alvo} SELECIONADO NA LISTA", MONITOR_PANEL, 0.80, debug=True)
+            # 0.85 (era 0.80) -- caso real confirmado (2026-09-15 21:22,
+            # diag_assist): com 0.80, o template ("< ZAHIR W6G-26N >")
+            # deu falsos positivos de 0.799-0.833 numa linha que NÃO era o
+            # Zahir (abriu FUTEN SPACEPORT e depois NAV BEACON a seguir ao
+            # 'Space'). Match genuíno medido em jogo real: 0.886 (linha
+            # selecionada) / 0.873 (mesma linha, momento diferente) --
+            # 0.85 fica acima de todo o ruído observado sem se aproximar
+            # do match real.
+            LIMIAR_SELECIONADO = 0.85
+
+            def _linha_alvo_destacada(sufixo_label=""):
+                # Várias aparências possíveis da linha em destaque -- com
+                # '< >' fundo amarelo (template_selecionado), com '< >'
+                # fundo verde, sem '< >' fundo amarelo, sem '< >' fundo
+                # oliva (templates_selecionado_extra, só calibrados para o
+                # Zahir por agora) -- parece alternar/pulsar entre cores ao
+                # vivo. Qualquer uma confirma que a linha certa está em
+                # destaque; para no primeiro que bater.
+                if procurar_template(template_selecionado, f"{nome_alvo} SELECIONADO NA LISTA{sufixo_label}", MONITOR_PANEL, LIMIAR_SELECIONADO, debug=True):
+                    return True
+                for i, tpl_extra in enumerate(templates_selecionado_extra, 1):
+                    if procurar_template(tpl_extra, f"{nome_alvo} DESTACADO variante {i}{sufixo_label}", MONITOR_PANEL, LIMIAR_SELECIONADO, debug=True):
+                        return True
+                return False
+
+            # Screenshot da LISTA neste instante, antes do 'Space' -- sem
+            # isto nunca tínhamos o frame real de um falso positivo/negativo
+            # para inspecionar depois, só screenshots de OUTRO instante
+            # (o popup que abriu a seguir). Pedido direto do utilizador
+            # desta conversa.
+            _diag_passo(f"lista_falhas_lista{falhas_lista}")
+            linha_selecionada = _linha_alvo_destacada()
+            if not linha_selecionada:
+                # Antes de desistir desta tentativa (Backspace + reabrir),
+                # tenta "caçar" a linha certa com 'w' -- mesma ideia do
+                # varrimento já usado em select_target.py (lá com 's'), só
+                # que aqui a lista pode ter ficado com o cursor num sítio
+                # diferente do esperado (ex.: voltou ao topo depois de
+                # reabrir o painel) em vez de precisar de reabrir tudo outra
+                # vez. Até 5 tentativas de 'w', uma checagem a cada uma.
+                for tentativa_w in range(1, 6):
+                    pydirectinput.press('w')
+                    # 1.5s (era 0.7s) -- pedido do utilizador para despistar
+                    # se a lista precisa de mais tempo para assentar entre
+                    # cada 'w' antes da leitura seguinte.
+                    time.sleep(1.5)
+                    _diag_passo(f"lista_falhas_lista{falhas_lista}_apos_w{tentativa_w}")
+                    linha_selecionada = _linha_alvo_destacada(f" (apos 'w' {tentativa_w}/5)")
+                    if linha_selecionada:
+                        print(f"[OK] Linha '{nome_alvo}' encontrada com 'w' (tentativa {tentativa_w}/5).")
+                        break
+
             if not linha_selecionada:
                 falhas_lista += 1
                 if falhas_lista >= MAX_FALHAS_LISTA:
@@ -767,18 +1207,51 @@ def engatar_assistencia_menu():
             alvo_confirmado = True
             break
 
+        # Diagnóstico direto: confirma explicitamente SE abriu o NAV BEACON
+        # (não só "não é o Zahir/Futen", título ambíguo a 0.42) -- caso
+        # real repetido (2026-09-15 22:45-22:46): a caça com 'w' aterrava
+        # sempre no Nav Beacon. Template dedicado ('nav_beacon_confirm.png',
+        # recortado do próprio popup), separação limpa confirmada (1.000
+        # no Nav Beacon genuíno, 0.389 no Futen). Se for mesmo o Nav
+        # Beacon, tenta 's' (direção oposta ao 'w') antes da próxima volta
+        # à Fase A -- 'w' sozinho já mostrou ficar preso a aterrar sempre
+        # aqui.
+        e_nav_beacon = procurar_template(templates['nav_beacon_confirm'], "CONFIRM NAV BEACON (é mesmo este o errado?)", MONITOR_PANEL, 0.80, debug=True)
+        if e_nav_beacon:
+            print(f"[AVISO] Confirmado: abriu NAV BEACON em vez de '{nome_alvo}'.")
+            logging.info(f"engatar_assistencia_menu: popup confirmado como NAV BEACON em vez de '{nome_alvo}' -- a tentar 's' antes de repetir 'w'.")
+
         falhas_popup += 1
         if falhas_popup >= MAX_FALHAS_POPUP:
             pydirectinput.press('x')
             fechar_painel_se_aberto()
             _diag_passo("FALHA_confirmacao_popup")
             print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
-            logging.error(f"engatar_assistencia_menu: popup de '{nome_alvo}' (título={titulo_ok}, botão={toggle_ok}) não confirmou após {MAX_FALHAS_POPUP} falhas.")
+            logging.error(f"engatar_assistencia_menu: popup de '{nome_alvo}' (título={titulo_ok}, botão={toggle_ok}, nav_beacon={e_nav_beacon}) não confirmou após {MAX_FALHAS_POPUP} falhas.")
             abortar_com_erro(f"Falha crítica: popup de confirmação do alvo '{nome_alvo}' não validou (título ou botão) após {MAX_FALHAS_POPUP} falhas.")
 
         print(f"[AVISO] Popup de '{nome_alvo}' não validou (título={titulo_ok}, botão={toggle_ok}) -- falha {falhas_popup}/{MAX_FALHAS_POPUP}, a voltar à lista.")
         pydirectinput.press('backspace')
         time.sleep(0.5)
+        if e_nav_beacon:
+            # NÃO usar um número fixo de 's' -- caso real confirmado
+            # (2026-09-16, diag_assist 20260916_032611): com a lista desta
+            # sessão a ter exatamente 3 linhas (Zahir/Futen/Nav Beacon), um
+            # "3x 's'" fixo dá a volta completa e aterra sempre de volta no
+            # MESMO Nav Beacon de onde partiu -- confirmado com 4 ciclos
+            # seguidos, todos com o mesmo match exato (0.853-0.854 em
+            # (732, 543)), nunca escapando dali. O número certo de passos
+            # depende de quantas linhas a lista tem e da posição de cada
+            # uma (que pode reordenar por distância), por isso testa 's' um
+            # de cada vez e verifica logo a seguir com
+            # _linha_alvo_destacada() -- mesmo padrão já usado na caça com
+            # 'w' da Fase A -- em vez de disparar às cegas.
+            for tentativa_s in range(1, 3):
+                pydirectinput.press('s')
+                time.sleep(0.5)
+                if _linha_alvo_destacada(f" (apos 's' {tentativa_s}/2)"):
+                    print(f"[OK] Linha '{nome_alvo}' encontrada com 's' (tentativa {tentativa_s}/2).")
+                    break
 
     # 3. Selecionar o Supercruise Assist (D -> Space). Chega-se aqui sempre
     # com o Assist desligado -- o early return de assist_ja_ativo() no topo
@@ -790,37 +1263,99 @@ def engatar_assistencia_menu():
     # 'D' às vezes não move o foco (confirmado em jogo real: screenshot
     # 'apos_d' idêntico ao anterior, ainda no botão lock/unlock, "space"
     # seguinte ia fazer lock/unlock em vez de ativar o Assist -- ver
-    # diagnóstico desta conversa). Confirma POSITIVAMENTE que o foco chegou
-    # ao botão "SUPERCRUISE ASSIST" (assist_toggle em foco) -- mais forte
-    # que só confirmar a ausência do botão lock/unlock, que não garante que
-    # o foco foi mesmo parar ao sítio certo (só que saiu do errado). Até 2
-    # tentativas de 'D', senão aborta.
-    MAX_TENTATIVAS_D = 2
-    foco_moveu = False
+    # diagnóstico desta conversa). Cada ícone da barra de baixo tem a sua
+    # própria legenda na lista "Local Activities" quando está em foco (o
+    # lock/unlock mostra "UNLOCK DESTINATION", por exemplo) -- por isso só
+    # sai deste loop quando a legenda for EXATAMENTE uma das duas do botão
+    # do Assist: "SUPERCRUISE ASSIST" (desligado) ou "DEACTIVATE
+    # SUPERCRUISE ASSIST" (ligado). Qualquer outra coisa (incluindo
+    # nenhuma das duas) significa que o foco ainda não chegou lá -- continua
+    # a tentar em vez de decidir às cegas. Confirmado com screenshots reais
+    # dos dois estados (temp/ desta conversa).
+    MAX_TENTATIVAS_D = 3
+    assist_on_lido = False
+    assist_off_lido = False
     for tentativa_d in range(1, MAX_TENTATIVAS_D + 1):
         print(f">>> Movendo para o botão Supercruise Assist (D), tentativa {tentativa_d}/{MAX_TENTATIVAS_D}...")
         pydirectinput.press('d')
         time.sleep(1.5)
         _diag_passo(f"apos_d_tentativa{tentativa_d}")
-        foco_moveu = procurar_template(templates['assist_toggle'], "SUPERCRUISE ASSIST TOGGLE (apos D, deve estar em foco)", MONITOR_PANEL, 0.80, debug=True)
-        if foco_moveu:
+        assist_on_lido = procurar_template(templates['deactivate_assist'], "DEACTIVATE SUPERCRUISE ASSIST (legenda)", MONITOR_PANEL, 0.85, debug=True)
+        assist_off_lido = (not assist_on_lido) and procurar_template(templates['assist_toggle'], "SUPERCRUISE ASSIST (legenda, sem DEACTIVATE)", MONITOR_PANEL, 0.80, debug=True)
+        if assist_on_lido or assist_off_lido:
             break
-        print(f"[AVISO] 'D' não moveu o foco para o Supercruise Assist (tentativa {tentativa_d}/{MAX_TENTATIVAS_D}).")
+        print(f"[AVISO] Legenda ainda não é 'SUPERCRUISE ASSIST' nem 'DEACTIVATE SUPERCRUISE ASSIST' (tentativa {tentativa_d}/{MAX_TENTATIVAS_D}).")
 
-    if not foco_moveu:
+    if not (assist_on_lido or assist_off_lido):
         pydirectinput.press('backspace')
         time.sleep(0.3)
         pydirectinput.press('backspace')
         time.sleep(0.5)
-        _diag_passo("FALHA_d_nao_moveu_foco")
+        _diag_passo("FALHA_legenda_nao_confirmada")
         print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
-        logging.error(f"engatar_assistencia_menu: 'D' não moveu o foco para o Supercruise Assist após {MAX_TENTATIVAS_D} tentativas.")
-        abortar_com_erro(f"Falha crítica: 'D' não moveu o foco para o Supercruise Assist após {MAX_TENTATIVAS_D} tentativas.")
+        logging.error(f"engatar_assistencia_menu: legenda do Assist não confirmada (nem ativo nem inativo) após {MAX_TENTATIVAS_D} tentativas de 'D'.")
+        abortar_com_erro(f"Falha crítica: legenda do Supercruise Assist não confirmada após {MAX_TENTATIVAS_D} tentativas de 'D'.")
 
-    print(">>> Ativando Assistência (Space)...")
-    pydirectinput.press('space')
-    time.sleep(1.0)
-    _diag_passo("apos_dspace")
+    if assist_on_lido:
+        print(">>> Legenda já diz 'DEACTIVATE SUPERCRUISE ASSIST' -- Assist já está ligado, a NÃO premir Space (desligava-o).")
+        logging.info("engatar_assistencia_menu: legenda confirma Assist já ligado antes do Space -- toggle saltado de propósito.")
+    else:
+        print(">>> Legenda diz 'SUPERCRUISE ASSIST' (desligado) -- a ativar (Space)...")
+
+        # Repete o próprio Space (não só a releitura) até 3 vezes -- caso
+        # real confirmado (2026-09-15 19:16-19:17, diag_assist): a legenda
+        # ficou EXATAMENTE igual ("SUPERCRUISE ASSIST", mesmo ícone em
+        # foco) antes e depois do Space -- o toggle não reagiu de todo,
+        # não foi só a legenda a demorar a re-renderizar. Um único Space
+        # que se perca (pydirectinput, como qualquer envio de tecla, pode
+        # falhar em silêncio) deixava o Assist genuinamente desligado.
+        # Mesmo padrão já portado do Vasco-Nobara/Linux para o Space final
+        # do undocking.py.
+        #
+        # IMPORTANTE (confirmado pelo utilizador): quando o Space faz mesmo
+        # efeito e ativa o Assist, o jogo sai deste ecrã de info e VOLTA
+        # PARA A LISTA (o mesmo ecrã do '1', com as linhas < FUTEN
+        # SPACEPORT >/ZAHIR W6G-26N/NAV BEACON) -- não fica aqui à espera
+        # que a legenda mude para "DEACTIVATE SUPERCRUISE ASSIST" no MESMO
+        # ecrã, porque esse ecrã deixa de existir. Isto explica por que
+        # nenhuma captura automática alguma vez viu a legenda mudar: a
+        # confirmação por legenda estava a olhar para um ecrã que já não
+        # estava lá. A confirmação certa é a linha do alvo
+        # (template_selecionado, já usado na Fase A) voltar a aparecer na
+        # lista -- prova positiva de que voltámos a ela.
+        #
+        # NÃO usar assist_ja_ativo() aqui -- tentado e revertido (caso real
+        # confirmado 2026-09-15 19:40, diag_assist
+        # 04_confirmacao_apos_space_tentativa1_confirmou.png): o
+        # MONITOR_HUD (left=1050) sobrepõe-se à zona onde o ecrã de info
+        # fica aberto (~430-1260), e o retículo do HUD deu falso positivo
+        # em cima do próprio painel. Só é um sinal válido a partir da
+        # vista de cabine, com o painel todo fechado.
+        ligou_confirmado = False
+        for tentativa_space in range(1, 4):
+            pydirectinput.press('space')
+            time.sleep(2.5)
+            _diag_passo(f"apos_dspace_tentativa{tentativa_space}")
+
+            # Poll com margem (até 2s) em vez de uma leitura única.
+            for _ in range(4):
+                ligou_confirmado = procurar_template(template_selecionado, f"{nome_alvo} DE VOLTA NA LISTA (confirma ativação)", MONITOR_PANEL, 0.80, debug=True)
+                if ligou_confirmado:
+                    break
+                time.sleep(0.5)
+            _diag_passo(f"confirmacao_apos_space_tentativa{tentativa_space}_{'confirmou' if ligou_confirmado else 'nao_confirmou'}")
+            if ligou_confirmado:
+                break
+            print(f"[AVISO] Nem a legenda nem o HUD confirmaram o Assist ligado após o Space (tentativa {tentativa_space}/3).")
+
+        # Se mesmo após 3 tentativas de Space (com tempo de sobra e dois
+        # sinais possíveis) nenhum dos dois confirmar, é sinal real de
+        # falha -- aborta e pede intervenção manual, em vez de seguir às
+        # cegas com o Assist possivelmente desligado.
+        if not ligou_confirmado:
+            print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
+            logging.error("engatar_assistencia_menu: Space não confirmou ativação (nem legenda nem HUD) após 3 tentativas.")
+            abortar_com_erro("Falha crítica: Supercruise Assist não confirmou ativação após 3 tentativas de Space -- intervenção manual necessária.")
 
     # Fecha o painel -- Backspace (UI Back) em vez de '1', que também é um
     # toggle e podia reabrir o painel em vez de o fechar se o estado do menu
@@ -864,32 +1399,24 @@ def engatar_assistencia_menu():
         logging.error("engatar_assistencia_menu: painel não fechou após 3 tentativas de Backspace.")
         abortar_com_erro("Falha crítica: painel não fechou após ativar o Supercruise Assist -- a parar antes de mandar teclas de alinhamento para um menu ainda aberto.")
 
-    # Confirma que o Assist REALMENTE ligou -- D+Space (passo 3, acima) é às
-    # cegas, sem nenhum template dentro do painel a confirmar o toggle; só
-    # dá para confirmar já com o painel fechado, pelos templates do HUD
-    # central (assist_ja_ativo(), os mesmos usados no early-return do topo
-    # desta função). Sem isto, um D+Space que por qualquer razão não tenha
-    # acertado no botão (ex.: painel ainda a assentar) passava despercebido
-    # -- o processo avançava para o alinhamento sem o Assist estar
-    # realmente ativo, e só falhava bem mais tarde, no timeout do
-    # engatar_assist_e_alinhar(), sem apontar à causa real. Poll com
-    # margem (até 2s) em vez de uma leitura única -- o banner pode demorar
-    # um instante a aparecer mesmo com o toggle já aplicado.
-    assist_confirmado = False
-    for i in range(1, 5):
-        assist_confirmado = assist_ja_ativo()
-        _diag_passo(f"confirmar_assist_tentativa{i}_{'ok' if assist_confirmado else 'falhou'}")
-        if assist_confirmado:
-            break
-        time.sleep(0.5)
-
-    if not assist_confirmado:
-        print(f"[DIAG] Pasta de diagnóstico desta tentativa: {_diag_dir}")
-        logging.error("engatar_assistencia_menu: painel fechou mas Supercruise Assist não mostrou nenhum sinal de estar ativo (nem ASSIST_ACTIVE nem align_warning) após D+Space.")
-        abortar_com_erro("Falha crítica: Supercruise Assist não ativou -- painel fechou normalmente mas D+Space não teve o efeito esperado no HUD.")
-
-    logging.info(f"engatar_assistencia_menu: sequência concluída (NAV confirmado, alvo={nome_alvo or 'N/D'} confirmado, D+Space enviado, Assist confirmado ativo).")
-    print(">>> Painel fechado. Assist confirmado. Voltando ao Cockpit.")
+    # NÃO se confirma "Assist ativo" aqui -- nem ASSIST_ACTIVE nem
+    # align_warning aparecem já neste instante, mesmo com o toggle a
+    # funcionar perfeitamente: essa lição já tinha sido aprendida (e
+    # documentada) no Vasco-Nobara/Linux -- "essa mensagem só aparece
+    # depois do alvo estar alinhado (o toggle liga-se já, mas fica 'à
+    # espera' até _alinhar_com_olho() apontar a nave). Confirmar isto aqui
+    # abortava sempre, mesmo com o toggle a funcionar bem." Tínhamos essa
+    # verificação aqui do lado Windows e ela reproduziu exatamente esse
+    # falso-abort em produção (3 falhas seguidas na mesma noite, todas com
+    # o D+Space aparentemente bem-sucedido pelos screenshots de
+    # diagnóstico -- ver diagnóstico desta conversa). A proteção contra um
+    # 'D' que não acerta no botão já existe mais acima (o loop de
+    # confirmação de foco via template 'assist_toggle' antes do Space); a
+    # confirmação real de que o Assist está mesmo a funcionar é feita a
+    # seguir, em engatar_assist_e_alinhar() / monitorar_viagem(), já depois
+    # do alinhamento começar -- exatamente onde o Linux também a faz.
+    logging.info(f"engatar_assistencia_menu: sequência concluída (NAV confirmado, alvo={nome_alvo or 'N/D'} confirmado, D+Space enviado, painel fechado).")
+    print(">>> Painel fechado. Assistência ligada. Voltando ao Cockpit.")
 
 def engatar_assist_e_alinhar(timeout=150, ancora_log=None):
     """ Sequência padrão ao entrar em Supercruise -- usada tanto no arranque
@@ -911,13 +1438,19 @@ def engatar_assist_e_alinhar(timeout=150, ancora_log=None):
           se manda nenhum impulso manual (olho.py) por cima -- o Assist já
           está a "puxar" a nave sozinho, e um impulso extra pode ultrapassar
           a janela apertada de alinhamento e reacender o aviso do jogo.
-      (b) BÚSSOLA/HUD + SEM AVISO DO JOGO: olho.executar_passo_alinhamento()
+      (b) BÚSSOLA + HUD + SEM AVISO DO JOGO: olho.executar_passo_alinhamento()
           reporta 'alinhado_frame' (bússola ALINHADO_MACRO ou retículo do
-          HUD travado) E o aviso nativo do jogo ("ALIGN WITH TARGET
-          DESTINATION", template align_warning) NÃO está visível,
-          sustentados 3s SEGUIDOS. O aviso do jogo prevalece sobre a
-          bússola/HUD -- só a bússola/HUD já deu falsos positivos com o
-          aviso do jogo ainda bem visível no ecrã.
+          HUD travado) E o retículo do HUD confirma independentemente
+          (dentro de olho.DEAD_ZONE_HUD -- 'alinhado_frame' sozinho pode vir
+          só da bússola, sem o HUD ter confirmado nada) E o aviso nativo do
+          jogo ("ALIGN WITH TARGET DESTINATION", template align_warning)
+          NÃO está visível, sustentados 3s SEGUIDOS. O aviso do jogo
+          prevalece sobre bússola/HUD -- só a bússola sozinha já deu falsos
+          positivos, tanto com o aviso do jogo ainda bem visível no ecrã
+          como (mais grave) com o Assist completamente desligado e a nave
+          calhada de já estar virada para o alvo (nesse caso nem o
+          align_warning aparece -- só aparece com o Assist ligado -- por
+          isso a exigência extra do HUD, portada do Vasco-Nobara/Linux).
 
     Devolve True quando confirmado, ou a string "chegada_curta" se a nave
     chegar ao destino (telemetria + Journal confirmam, ANCORADOS a
@@ -949,6 +1482,8 @@ def engatar_assist_e_alinhar(timeout=150, ancora_log=None):
     tempo_confirmado_telemetria = None
     tempo_confirmado_bussola = None
     ultimo_heartbeat = 0.0
+    ultimo_x = 0.0
+    INTERVALO_X = 5.0  # segundos entre repeticoes do 'x' durante a correcao manual
     confirmacoes_fora_supercruise = 0
     # Recuperacao por roll quando a bussola fica cega (planeta/brilho a
     # tapar a leitura) -- executar_passo_alinhamento() e deliberadamente sem
@@ -1029,31 +1564,85 @@ def engatar_assist_e_alinhar(timeout=150, ancora_log=None):
 
             # Caminho (b): bússola/HUD (olho.py) + sem aviso do jogo,
             # sustentados 3s. Corrige ativamente enquanto não confirma.
+            #
+            # 'x' (estabilizar/acelerador a zero) repetido a cada
+            # INTERVALO_X enquanto este caminho estiver ativo -- caso real
+            # confirmado (2026-09-15 22:20-22:29): 150s inteiros neste
+            # caminho sem NENHUM 'x' a seguir ao primeiro (só enviado uma
+            # vez, no início de engatar_assistencia_menu(), antes de abrir
+            # qualquer painel), a nave a acelerar continuamente em
+            # Supercruise, e o 'ALIGN WITH TARGET DESTINATION' nunca saiu
+            # do ecrã -- manobrabilidade em Supercruise cai com a
+            # velocidade, por isso deixar a nave acelerar à vontade durante
+            # os pequenos impulsos corretivos do olho.py torna cada vez
+            # mais difícil (ou impossível) completar a curva. Não se aplica
+            # ao caminho (a) -- aí o Assist já está a puxar sozinho, e o
+            # próprio código já evita mandar qualquer input manual por cima
+            # (ver comentário acima).
+            if time.time() - ultimo_x >= INTERVALO_X:
+                ultimo_x = time.time()
+                pydirectinput.press('x')
+                print("[LOG] 'x' (estabilizar) -- mantém a manobrabilidade durante a correção manual.")
+
             passo = olho.executar_passo_alinhamento(sct, area_bussola, CX_NEUTRO, CY_NEUTRO)
             olho.mostrar_debug_visual(passo, CX_NEUTRO, CY_NEUTRO)
 
-            # Bussola cega (coords_bola None -- "NÃO_DETETADO"): tenta um
-            # roll de recuperação JÁ NO PRIMEIRO frame, sem esperar
-            # TEMPO_CEGO_ANTES_ROLL (8s, valor do loop standalone em
-            # olho.py, pensado para um contexto diferente). O roll em si é
-            # "pequeno" -- só ~45 graus de orientação (TECLA_ROLL/
-            # TEMPO_ROLL_45 já calibrados em olho.py), não muda o rumo, por
-            # isso reagir de imediato é mais barato do que ficar 8s parado
-            # sem fazer nada à espera que se resolva sozinho (foi isto que
-            # esgotou os 150s inteiros num caso real, ver diagnóstico desta
-            # conversa). MAX_ROLLS_RECUPERACAO (3) continua a limitar o
-            # número de tentativas, e executar_roll_recuperacao() já tem o
-            # seu próprio cooldown (2s) antes da leitura seguinte.
-            if passo["coords_bola"] is None:
-                if rolls_recuperacao < olho.MAX_ROLLS_RECUPERACAO:
+            # Bussola cega (coords_bola None -- "NÃO_DETETADO"): se já houve
+            # alguma leitura válida nesta sessão, executar_passo_alinhamento()
+            # já tratou disto sozinho (desloca-se fortemente na direção do
+            # último comando conhecido -- ver obter_ultimo_comando_valido()/
+            # aplicar_manobra_bussola(forcar_forte=True) em olho.py); nada a
+            # fazer aqui nesse caso, só chamar de novo duplicava o impulso.
+            # Pedido direto do utilizador (caso real: log de 03:16 desta
+            # conversa, "Bússola cega e já sem rolls" repetido, alvo sabia-se
+            # estar ACIMA mas o código não fazia nada com essa informação).
+            #
+            # Se a bola NUNCA foi vista nesta sessão (sem última posição
+            # nenhuma), não há para onde se deslocar -- aí sim rodar até
+            # MAX_ROLLS_NUNCA_ADQUIRIDO (8) vezes; se mesmo assim continuar
+            # sem leitura, último recurso: impulso forte 'w' a 16x
+            # IMPULSO_BUSSOLA (executar_impulso_nunca_adquirido()). Pedido
+            # direto do utilizador.
+            if passo["coords_bola"] is None and olho.obter_ultimo_comando_valido() is None:
+                if rolls_recuperacao < olho.MAX_ROLLS_NUNCA_ADQUIRIDO:
                     rolls_recuperacao += 1
-                    olho.executar_roll_recuperacao(rolls_recuperacao)
+                    olho.executar_roll_recuperacao(rolls_recuperacao, max_tentativas=olho.MAX_ROLLS_NUNCA_ADQUIRIDO)
                 else:
-                    print(f"[AVISO] Bússola cega e já sem rolls de recuperação disponíveis ({olho.MAX_ROLLS_RECUPERACAO}/{olho.MAX_ROLLS_RECUPERACAO} usados) -- a continuar a ler na mesma.")
+                    olho.executar_impulso_nunca_adquirido()
 
             ainda_avisa = procurar_template(templates['align_warning'], "ALIGN WARNING (jogo)", MONITOR_CENTER, 0.82, debug=True, sct=sct)
 
-            if passo["alinhado_frame"] and not ainda_avisa:
+            # Oclusão de LOS real vista no HUD a meio do voo -- distinto do
+            # align_warning ("ALIGN WITH TARGET DESTINATION", desalinhamento
+            # normal). _tratar_los_detetado_em_voo() decide sozinha se
+            # regista/age (só com a perna limpa) e nunca devolve controlo
+            # normalmente: ou vira a nave para trás (sys.exit com o código
+            # especial que o vasco.py reconhece) ou aborta a pedir ajuda
+            # humana.
+            if procurar_template(templates['line_of_sight'], "LINE OF SIGHT (oclusão real, meio do voo)", MONITOR_CENTER, 0.82, debug=True, sct=sct):
+                _tratar_los_detetado_em_voo()
+
+            # 'alinhado_frame' fica True só pela bússola (ALINHADO_MACRO),
+            # sem o HUD confirmar nada -- ver docstring de
+            # olho.executar_passo_alinhamento(): "já não fica à espera do
+            # HUD travar o alvo com precisão". Isso basta para PARAR de
+            # corrigir o rumo, mas não chega para confirmar que o Assist
+            # está mesmo ligado: se o Assist estiver desligado e a nave
+            # calhar de já estar virada para o alvo, a bússola diz
+            # "alinhado" e o align_warning nunca aparece (só aparece com o
+            # Assist ligado) -- falso positivo confirmado em produção
+            # (2026-09-14/15: "confirmado via bússola/HUD" com o Assist
+            # realmente desligado, ver diagnóstico desta conversa). O
+            # Vasco-Nobara/Linux já tinha este exato problema e corrige-o
+            # exigindo também o retículo do HUD centrado (hud_confirma),
+            # nunca só a bússola -- porta-se aqui a mesma exigência, com o
+            # DEAD_ZONE_HUD que já existe (e já está calibrado) neste
+            # projeto, em vez de inventar uma tolerância nova.
+            hud_confirma = (passo["encontrou_hud"] and not passo["alvo_nas_costas"]
+                            and abs(passo["dx_hud"]) <= olho.DEAD_ZONE_HUD
+                            and abs(passo["dy_hud"]) <= olho.DEAD_ZONE_HUD)
+
+            if passo["alinhado_frame"] and hud_confirma and not ainda_avisa:
                 rolls_recuperacao = 0  # leitura recuperada; futuras perdas tem direito a novos rolls
                 if tempo_confirmado_bussola is None:
                     tempo_confirmado_bussola = time.time()
@@ -1128,6 +1717,16 @@ def monitorar_viagem(resultado_assist, ancora_log=None):
             if confirmar_chegada_por_journal(ancora_log=ancora_log):
                 chegada_confirmada = True
             else:
+                # Marca a perna como suja ANTES de acionar o plano de fuga --
+                # sem isto, se executar_fuga() recuperar com sucesso (o
+                # processo acaba por sair com código 0), leg_esta_limpa()
+                # ficava a mentir "perna limpa" para quem vem a seguir (ex.:
+                # _tratar_los_detetado_em_voo(), que exige "sem
+                # interferências humanas ou piratas/queda do supercruise"
+                # antes de registar/agir) -- marcar_leg_suja() só era chamada
+                # em vasco.py, nunca aqui, para uma queda recuperada dentro
+                # do mesmo processo.
+                marcar_leg_suja()
                 # plano_fuga.executar_fuga() ja confirma Supercruise
                 # internamente antes de devolver (nao so FSD_CHARGING) --
                 # aguardar_supercruise_confirmado() aqui seria redundante.

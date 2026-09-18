@@ -174,10 +174,23 @@ def falar(texto):
 # 2. MOTOR DE CONTEXTO (LOGS DO ELITE)
 # ==========================================
 def obter_alvo_contextual_log():
-    """ 
+    """
     Lê o Journal e decide o destino com base no ESTADO ATUAL (docked ou undocked).
     Retorna o DESTINO ALVO para marcar.
+
+    VASCO_FORCE_TARGET ('carrier'/'station'), se definida, ignora esta
+    deteção dinâmica e devolve-a diretamente -- usado por
+    supercruise_assist.py quando decide voltar para a origem a meio do voo
+    (oclusão de LOS confirmada): a deteção normal por Journal olha para o
+    último Undocked/Docked e aponta sempre para a frente (a mesma direção
+    de onde a nave já vem), nunca para trás, por isso não serve para um
+    regresso.
     """
+    forcado = os.environ.get("VASCO_FORCE_TARGET")
+    if forcado in ("carrier", "station"):
+        print(f"[CONTEXTO] VASCO_FORCE_TARGET definida -- a forçar destino: {forcado.upper()}.")
+        return forcado
+
     try:
         list_of_files = glob.glob(os.path.join(LOG_DIR, 'Journal.*.log'))
         if not list_of_files: 
